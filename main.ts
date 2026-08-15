@@ -2500,33 +2500,12 @@ class DeleteImageModal extends Modal {
   }
 }
 
-/** 声明式设置条目（Obsidian 1.13+ 设置搜索 API 的最小形状） */
-interface QdnSettingDefinition {
-  name: string;
-  desc?: string;
-}
-
 class QuickDailyNoteSettingTab extends PluginSettingTab {
   plugin: QuickDailyNotePlugin;
 
   constructor(app: App, plugin: QuickDailyNotePlugin) {
     super(app, plugin);
     this.plugin = plugin;
-  }
-
-  /** 声明式设置定义：让设置项出现在 Obsidian 1.13+ 的设置搜索中 */
-  getSettingDefinitions(): QdnSettingDefinition[] {
-    return [
-      { name: "存放位置", desc: "日记文件的存放文件夹，留空则存放在库根目录" },
-      { name: "日期格式", desc: "moment 日期格式，例如：YYYY-MM-DD" },
-      { name: "粘贴代码自动识别语言", desc: "粘贴代码时自动识别编程语言并生成代码块" },
-      { name: "选中文本设置标题等级", desc: "将选中文本块内的标题统一调整到指定等级" },
-      { name: "粘贴图片保存到指定目录", desc: "粘贴图片自动保存到指定目录并插入链接" },
-      { name: "图片渲染增强", desc: "图片自适应宽度，工具栏可裁剪、放大、复制、重命名、删除" },
-      { name: "Mermaid 图表", desc: "初始显示方式、PNG 导出倍率、图表最大高度" },
-      { name: "创建日记时自动记录天气", desc: "创建日记后自动写入当天天气（Open-Meteo）" },
-      { name: "定时提醒", desc: "添加待办提醒与未完成待办检查" },
-    ];
   }
 
   display() {

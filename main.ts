@@ -279,7 +279,8 @@ export default class QuickDailyNotePlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
-    this.applyBackground();
+    // 等布局就绪后再应用背景，避免加载早期 vault 文件解析不完全导致误判
+    this.app.workspace.onLayoutReady(() => this.applyBackground());
 
     this.addRibbonIcon("calendar-plus", "快捷日记", (evt) => {
       this.showMainMenu(evt);
@@ -435,9 +436,9 @@ export default class QuickDailyNotePlugin extends Plugin {
     }
     const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
     if (!file || !("extension" in file)) {
+      // 仅提示，不修改设置：加载早期可能暂时解析不到文件，误关会把配置持久化
+      console.warn("Quick Daily Note: 背景文件不存在", path);
       new Notice("背景文件不存在，请检查设置中的图片路径");
-      s.bgEnabled = false;
-      void this.saveSettings();
       document.body.toggleClass("qdn-bg-image", false);
       this.destroyBgVideo();
       return;

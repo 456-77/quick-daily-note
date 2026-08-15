@@ -1,0 +1,42 @@
+name: Release obsidian plugin
+
+on:
+  push:
+    tags:
+      - "*"
+
+env:
+  PLUGIN_NAME: quick-daily-note
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build
+        id: build
+        run: |
+          npm install
+          npm run build
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          release_name="Quick Daily Note ${tag}"
+
+          mkdir -p "$tag"
+          cp main.js manifest.json styles.css versions.json "$tag/"
+
+          gh release create "$tag" \
+            "$tag"/main.js "$tag"/manifest.json "$tag"/styles.css "$tag"/versions.json \
+            --title "$release_name" \
+            --generate-notes

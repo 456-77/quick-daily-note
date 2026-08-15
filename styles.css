@@ -1,0 +1,833 @@
+/* 标题等级弹窗 */
+.qdn-heading-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.qdn-heading-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.qdn-heading-btn {
+  padding: 10px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  cursor: pointer;
+  font-size: 13px;
+  text-align: center;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.qdn-heading-btn:hover {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
+/* 弹窗 */
+.qdn-modal h3 {
+  margin-top: 0;
+}
+
+.qdn-notice {
+  cursor: pointer;
+}
+
+.qdn-modal .qdn-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 8px 0;
+}
+
+.qdn-modal .qdn-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 日历面板 */
+.qdn-panel {
+  padding: 8px 12px;
+  user-select: text;
+}
+
+.qdn-calendar {
+  margin-bottom: 16px;
+}
+
+.qdn-cal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.qdn-cal-title {
+  font-weight: 600;
+}
+
+.qdn-cal-nav {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 18px;
+  padding: 0 8px;
+  color: var(--text-muted);
+}
+
+.qdn-cal-nav:hover {
+  color: var(--text-normal);
+}
+
+.qdn-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.qdn-cal-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 3px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.qdn-cal-cell:hover {
+  background: var(--background-modifier-hover);
+}
+
+.qdn-cal-weekday {
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: default;
+}
+
+.qdn-cal-weekday:hover {
+  background: transparent;
+}
+
+.qdn-cal-outside {
+  color: var(--text-faint);
+}
+
+.qdn-cal-today {
+  color: var(--text-accent);
+  font-weight: 700;
+}
+
+.qdn-cal-selected,
+.qdn-cal-selected:hover {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.qdn-cal-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+  margin-top: 1px;
+}
+
+/* 待办事项 */
+.qdn-todos {
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 12px;
+}
+
+.qdn-todos-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.qdn-todos-count {
+  background: var(--background-modifier-hover);
+  border-radius: 10px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.qdn-todos-date {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.qdn-open-note-btn {
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 6px;
+  transition: color 0.15s ease, border-color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.qdn-open-note-btn:hover {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
+
+.qdn-todo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.qdn-todo-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  transition: background-color 0.15s ease;
+}
+
+.qdn-todo-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.qdn-todo-item.qdn-todo-completed {
+  background: var(--background-modifier-hover);
+}
+
+.qdn-todo-item input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex-shrink: 0;
+  border: 1.5px solid var(--checkbox-border-color, var(--text-muted));
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.qdn-todo-item input[type="checkbox"]:hover {
+  border-color: var(--checkbox-color, var(--interactive-accent));
+}
+
+.qdn-todo-item input[type="checkbox"]:active {
+  transform: scale(0.9);
+}
+
+.qdn-todo-item input[type="checkbox"]:checked {
+  background: var(--checkbox-color, var(--interactive-accent));
+  border-color: var(--checkbox-color, var(--interactive-accent));
+}
+
+.qdn-todo-item input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--checkbox-check-color, var(--text-on-accent));
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.qdn-todo-text {
+  flex: 1;
+  font-size: 13px;
+  word-break: break-word;
+  user-select: text;
+  cursor: text;
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+.qdn-todo-completed .qdn-todo-text {
+  text-decoration: line-through;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.qdn-todo-delete {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: color 0.15s ease, background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.qdn-todo-item:hover .qdn-todo-delete {
+  opacity: 1;
+}
+
+.qdn-todo-delete:hover {
+  color: var(--text-error);
+  background: color-mix(in srgb, var(--text-error) 12%, transparent);
+}
+
+.qdn-todo-edit-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: color 0.15s ease, background-color 0.15s ease, opacity 0.15s ease;
+}
+
+.qdn-todo-item:hover .qdn-todo-edit-btn {
+  opacity: 1;
+}
+
+.qdn-todo-edit-btn:hover {
+  color: var(--interactive-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+
+.qdn-todo-edit-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  border-radius: 4px;
+  border: 1px solid var(--interactive-accent);
+  background: var(--background-primary);
+  padding: 2px 6px;
+}
+
+.qdn-todo-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 16px 8px;
+  text-align: center;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 6px;
+}
+
+.qdn-todo-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.qdn-todo-add input {
+  flex: 1;
+  min-width: 0;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  padding: 6px 10px;
+  font-size: 13px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.qdn-todo-add input:focus {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 20%, transparent);
+}
+
+.qdn-todo-add-btn {
+  border-radius: 6px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  flex-shrink: 0;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+.qdn-todo-add-btn:hover {
+  opacity: 0.85;
+}
+
+.qdn-todo-add-btn:active {
+  transform: scale(0.95);
+}
+
+/* 图片渲染增强 */
+.qdn-img-enhancer {
+  position: relative;
+  display: block;
+  max-width: 100%;
+  margin: 6px 0;
+}
+
+.qdn-img-enhancer img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+  cursor: zoom-in;
+}
+
+.qdn-img-enhancer.qdn-img-tall img {
+  max-height: var(--qdn-img-maxh, 70vh);
+  width: auto;
+  margin: 0 auto;
+}
+
+.qdn-img-toolbar {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--background-primary);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 10;
+}
+
+.qdn-img-enhancer:hover .qdn-img-toolbar {
+  opacity: 1;
+}
+
+.qdn-img-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--text-normal);
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+
+.qdn-img-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--interactive-accent);
+}
+
+.qdn-img-btn:active {
+  transform: scale(0.92);
+}
+
+/* 图片放大弹窗：宽度贴合图片，压缩内部留白 */
+.qdn-img-zoom-modal {
+  min-width: 0 !important;
+  max-width: 96vw !important;
+  padding: 0 !important;
+  max-height: none !important;
+  border-radius: 6px;
+}
+
+.qdn-img-zoom-modal .modal-title {
+  display: none;
+}
+
+.qdn-img-zoom-modal .modal-content {
+  padding: 4px !important;
+}
+
+.qdn-img-zoom-body {
+  position: relative;
+  display: block;
+  width: fit-content;
+  margin: 0 auto;
+}
+
+.qdn-img-zoom-body img {
+  max-width: 96vw;
+  max-height: 88vh;
+  width: auto;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+  cursor: zoom-out;
+  border-radius: 4px;
+}
+
+.qdn-img-zoom-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  z-index: 10;
+  opacity: 0.85;
+  transition: opacity 0.15s ease;
+}
+
+.qdn-img-zoom-body:hover .qdn-img-zoom-toolbar,
+.qdn-img-zoom-toolbar:hover {
+  opacity: 1;
+}
+
+.qdn-img-zoom-toolbar .qdn-img-btn {
+  padding: 3px 8px;
+  font-size: 13px;
+  border-radius: 5px;
+  background: transparent;
+}
+
+.qdn-img-zoom-toolbar .qdn-img-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--interactive-accent);
+}
+
+.qdn-img-zoom-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+  margin-top: 6px;
+  padding-bottom: 4px;
+}
+
+/* 图片裁剪弹窗：宽度贴合图片，压缩内部留白 */
+.qdn-crop-modal {
+  min-width: 0 !important;
+  max-width: 96vw !important;
+  padding: 0 !important;
+  max-height: none !important;
+  border-radius: 6px;
+}
+
+.qdn-crop-modal .modal-title {
+  display: none;
+}
+
+.qdn-crop-modal .modal-content {
+  padding: 4px !important;
+}
+
+.qdn-crop-modal h3 {
+  margin: 4px 0 8px;
+  font-size: 14px;
+}
+
+.qdn-crop-modal .qdn-crop-area {
+  position: relative;
+  display: inline-block;
+  max-width: 96vw;
+  max-height: 88vh;
+  overflow: hidden;
+  cursor: crosshair;
+}
+
+.qdn-crop-modal .qdn-crop-area img {
+  display: block;
+  max-width: 96vw;
+  max-height: 88vh;
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+
+/* 工具栏：浮动在图片右上方 */
+.qdn-crop-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  z-index: 20;
+  opacity: 0.85;
+  transition: opacity 0.15s ease;
+}
+
+.qdn-crop-area:hover .qdn-crop-toolbar,
+.qdn-crop-toolbar:hover {
+  opacity: 1;
+}
+
+.qdn-crop-toolbar button {
+  padding: 4px 14px;
+  font-size: 13px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-normal);
+}
+
+.qdn-crop-toolbar button:hover {
+  background: var(--background-modifier-hover);
+}
+
+.qdn-crop-toolbar .mod-cta {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.qdn-crop-toolbar .mod-cta:hover {
+  background: var(--interactive-accent-hover, var(--interactive-accent));
+  opacity: 0.9;
+}
+
+.qdn-crop-select {
+  position: absolute;
+  border: 1.5px solid var(--interactive-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.qdn-crop-size {
+  position: absolute;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.qdn-crop-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 6px 0 2px;
+}
+
+.qdn-danger-btn {
+  background: var(--text-error) !important;
+  border-color: var(--text-error) !important;
+}
+
+/* 待办顺延提示 */
+.qdn-carryover {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 35%, transparent);
+  font-size: 12px;
+  color: var(--text-normal);
+}
+
+.qdn-carryover-btn {
+  border: none;
+  border-radius: 4px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.qdn-carryover-btn:hover {
+  opacity: 0.9;
+}
+
+/* 日记统计 */
+.qdn-stats {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 设置页使用说明 */
+.qdn-help {
+  font-size: 13px;
+  color: var(--text-normal);
+}
+
+.qdn-help h4 {
+  margin: 12px 0 4px;
+  font-size: 13px;
+  color: var(--text-accent);
+}
+
+.qdn-help ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.qdn-help li {
+  margin: 3px 0;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   Mermaid 渲染增强（整合自 Mermaid Enhancer）
+   自适应显示 / 缩放工具栏 / 打印（PDF 导出）样式
+   ============================================================ */
+
+/* 容器：相对定位（工具栏锚点），放大超出时出现滚动条 */
+.mermaid-enhancer-container {
+  position: relative;
+  width: 100%;
+  overflow: auto;
+  margin: 0.5em 0;
+  scrollbar-width: thin;
+}
+
+/* 内置 mermaid 渲染结果（div.mermaid > svg）保持在其内部 */
+.mermaid-enhancer-scroll {
+  width: 100%;
+}
+
+.mermaid-enhancer-scroll svg {
+  display: block;
+  height: auto;
+  margin: 0 auto;
+}
+
+/* ---------------- 悬浮工具栏 ---------------- */
+
+.mermaid-enhancer-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-s);
+  opacity: 0.35;
+  transition: opacity 0.15s ease;
+}
+
+.mermaid-enhancer-container:hover .mermaid-enhancer-toolbar,
+.mermaid-enhancer-toolbar:hover,
+.mermaid-enhancer-toolbar:focus-within {
+  opacity: 1;
+}
+
+.me-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-normal);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.me-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+.me-percent {
+  min-width: 40px;
+  padding: 0 4px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  white-space: nowrap;
+}
+
+/* ---------------- 下载菜单 ---------------- */
+
+.me-download-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  z-index: 20;
+  flex-direction: column;
+  min-width: 120px;
+  padding: 4px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-s);
+}
+
+.me-download-menu.me-open {
+  display: flex;
+}
+
+.me-menu-item {
+  padding: 5px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-normal);
+  text-align: left;
+  cursor: pointer;
+}
+
+.me-menu-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+/* ============================================================
+   打印 / 导出 PDF 增强
+
+   Obsidian 导出 PDF 时会打开隐藏窗口重新渲染笔记（不运行插件 JS，
+   但会复制全部 CSS），所以这里必须直接针对 Obsidian 内置渲染结构
+   .mermaid svg 设置样式，而不是依赖插件生成的容器类。
+   强制图片宽度适配页面、限制最大高度，避免超出页面被裁剪。
+   ============================================================ */
+
+@media print {
+  .mermaid-enhancer-container {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  /* 覆盖 Obsidian 内置 mermaid 渲染结果（含 PDF 隐藏窗口中的图） */
+  .mermaid svg {
+    width: 100% !important;
+    height: auto !important;
+    max-width: 100% !important;
+    max-height: 70vh !important;
+    margin: 0 auto !important;
+  }
+
+  .mermaid-enhancer-toolbar {
+    display: none !important;
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "quick-daily-note",
+  "version": "2.2.1",
+  "description": "快捷日记 + 待办 + 粘贴代码语言识别 + 图片增强 + Mermaid 图表增强（整合原 Mermaid Enhancer 插件）。",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "daily-note"
+  ],
+  "author": "shuiyi",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "^1.7.2",
+    "tslib": "^2.8.0",
+    "typescript": "^5.6.0"
+  }
+}

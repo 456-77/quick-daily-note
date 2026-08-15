@@ -38,6 +38,9 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 ### 🌤️ Weather Recording
 - When enabled, the current day's weather is fetched and written below the note title after creating a daily note (data from Open-Meteo, no API key; failures never block note creation).
 
+### 🖼️ App Background
+- Set the whole interface background to a custom image from your vault, with adjustable opacity.
+
 ## Screenshots
 
 ![Main view](image.png)
@@ -105,6 +108,14 @@ Download the latest release from GitHub, and copy `main.js`, `manifest.json`, an
 | Initial display mode | Fit width / original size; fit width by default |
 | PNG export scale | 1x / 2x / 3x; 2x by default |
 | Max diagram height | Percentage of viewport; 0 = unlimited; 60% by default |
+
+### App Background
+
+| Setting | Description |
+| --- | --- |
+| Enable background image | Off by default; restores the theme background when disabled |
+| Image path | Vault-relative path, e.g. `attachments/bg.png` |
+| Opacity | 30% – 100%; lower values keep text readable |
 
 ### Weather
 

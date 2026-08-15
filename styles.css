@@ -855,3 +855,42 @@ button.qdn-danger-btn {
     display: none;
   }
 }
+
+/* 自定义界面背景 */
+body.qdn-bg-image {
+  background-color: transparent;
+  --background-primary: transparent;
+  --background-primary-alt: transparent;
+  --background-secondary: transparent;
+  --background-secondary-alt: transparent;
+}
+
+body.qdn-bg-image::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image: var(--qdn-bg-url);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: var(--qdn-bg-opacity, 0.25);
+  pointer-events: none;
+}
+
+/* 各层背景透明化，露出背景图片 */
+body.qdn-bg-image .app-container,
+body.qdn-bg-image .workspace,
+body.qdn-bg-image .workspace-split,
+body.qdn-bg-image .workspace-tabs,
+body.qdn-bg-image .workspace-tab-container,
+body.qdn-bg-image .workspace-leaf,
+body.qdn-bg-image .workspace-leaf-content,
+body.qdn-bg-image .view-content,
+body.qdn-bg-image .markdown-source-view,
+body.qdn-bg-image .markdown-preview-view,
+body.qdn-bg-image .workspace-ribbon,
+body.qdn-bg-image .status-bar,
+body.qdn-bg-image .titlebar {
+  background-color: transparent;
+}

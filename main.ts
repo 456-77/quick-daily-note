@@ -89,6 +89,12 @@ interface QuickDailyNoteSettings {
   weatherEnabled: boolean;
   /** 天气城市名 */
   weatherCity: string;
+  /** 启用全局背景图片 */
+  bgEnabled: boolean;
+  /** 背景图片路径（vault 内相对路径） */
+  bgImagePath: string;
+  /** 背景图片不透明度 0-1 */
+  bgOpacity: number;
 }
 
 const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
@@ -110,6 +116,9 @@ const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
   mermaidMaxHeightPct: 60,
   weatherEnabled: false,
   weatherCity: "",
+  bgEnabled: false,
+  bgImagePath: "",
+  bgOpacity: 0.6,
 };
 
 /** WMO 天气代码 -> 描述与图标（Open-Meteo） */
@@ -237,6 +246,7 @@ export default class QuickDailyNotePlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    this.applyBackground();
 
     this.addRibbonIcon("calendar-plus", "快捷日记", (evt) => {
       this.showMainMenu(evt);
@@ -300,6 +310,9 @@ export default class QuickDailyNotePlugin extends Plugin {
     document.removeEventListener("click", this.zoomClickHandler, true);
     window.removeEventListener("beforeprint", this.onBeforePrint);
     window.removeEventListener("afterprint", this.onAfterPrint);
+    document.body.toggleClass("qdn-bg-image", false);
+    document.body.style.removeProperty("--qdn-bg-url");
+    document.body.style.removeProperty("--qdn-bg-opacity");
   }
 
   async loadSettings() {
@@ -352,6 +365,29 @@ export default class QuickDailyNotePlugin extends Plugin {
       this.imageObserver.disconnect();
       this.imageObserver = null;
     }
+  }
+
+  /** 应用全局背景图片设置（注入 CSS 变量并切换 body 类） */
+  applyBackground(): void {
+    const path = this.settings.bgImagePath.trim();
+    const enabled = this.settings.bgEnabled && path.length > 0;
+    document.body.toggleClass("qdn-bg-image", enabled);
+    if (!enabled) {
+      document.body.style.removeProperty("--qdn-bg-url");
+      document.body.style.removeProperty("--qdn-bg-opacity");
+      return;
+    }
+    const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
+    if (!file || !("extension" in file)) {
+      new Notice("背景图片不存在，请检查设置中的图片路径");
+      this.settings.bgEnabled = false;
+      void this.saveSettings();
+      document.body.toggleClass("qdn-bg-image", false);
+      return;
+    }
+    const url = this.app.vault.adapter.getResourcePath(normalizePath(path));
+    document.body.style.setProperty("--qdn-bg-url", `url("${url}")`);
+    document.body.style.setProperty("--qdn-bg-opacity", String(this.settings.bgOpacity));
   }
 
   /** 查找节点及其子树中可增强的图片 */
@@ -2671,6 +2707,52 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
       cls: "setting-item-description",
       text: "提示：更改图表设置仅对新渲染的图表生效，切换笔记或重新打开笔记即可看到效果。",
     });
+
+    new Setting(containerEl).setName("背景图片").setHeading();
+
+    new Setting(containerEl)
+      .setName("启用背景图片")
+      .setDesc("将整个软件界面背景设置为自定义图片；关闭后恢复默认主题背景。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.bgEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.bgEnabled = value;
+            await this.plugin.saveSettings();
+            this.plugin.applyBackground();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("图片路径")
+      .setDesc("vault 内相对路径，支持 png/jpg/webp/gif 等格式，例如：attachments/bg.png。")
+      .addText((text) =>
+        text
+          .setPlaceholder("attachments/bg.png")
+          .setValue(this.plugin.settings.bgImagePath)
+          .onChange(async (value) => {
+            this.plugin.settings.bgImagePath = value.trim();
+            await this.plugin.saveSettings();
+            this.plugin.applyBackground();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("图片不透明度")
+      .setDesc("数值越低背景越淡，文字越清晰。")
+      .addDropdown((dd) => {
+        dd.addOption("0.3", "30%");
+        dd.addOption("0.5", "50%");
+        dd.addOption("0.6", "60%");
+        dd.addOption("0.8", "80%");
+        dd.addOption("1", "100%");
+        dd.setValue(String(this.plugin.settings.bgOpacity));
+        dd.onChange(async (v) => {
+          this.plugin.settings.bgOpacity = parseFloat(v);
+          await this.plugin.saveSettings();
+          this.plugin.applyBackground();
+        });
+      });
 
     new Setting(containerEl).setName("天气记录").setHeading();
 

@@ -117,6 +117,17 @@ const WMO_WEATHER: Record<number, { desc: string; icon: string }> = {
   99: { desc: "雷暴伴冰雹", icon: "⛈️" },
 };
 
+/** Open-Meteo 地理编码响应（仅取用字段） */
+interface OpenMeteoGeocoding {
+  results?: { latitude: number; longitude: number }[];
+}
+
+/** Open-Meteo 天气预报响应（仅取用字段） */
+interface OpenMeteoForecast {
+  current?: { temperature_2m: number; weather_code: number };
+  daily?: { temperature_2m_max: number[]; temperature_2m_min: number[] };
+}
+
 /** mermaid 缩放状态 */
 interface ZoomState {
   naturalW: number;
@@ -264,7 +275,7 @@ export default class QuickDailyNotePlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<QuickDailyNoteSettings>);
   }
 
   async saveSettings() {
@@ -382,11 +393,9 @@ export default class QuickDailyNotePlugin extends Plugin {
     };
     mk("✂", "裁剪", () => this.openCropModal(img));
     mk("⛶", "放大", () => this.openZoomModal(img));
-    mk("⧉", "复制", () => this.copyImage(img));
+    mk("⧉", "复制", () => void this.copyImage(img));
     mk("✎", "重命名", () => this.openRenameModal(img));
     mk("🗑", "删除", () => this.openDeleteModal(img));
-
-    img.style.cursor = "zoom-in";
   }
 
   /**
@@ -559,7 +568,7 @@ export default class QuickDailyNotePlugin extends Plugin {
       try {
         const key = this.normPath(decodeURIComponent(raw));
         if (key.includes(fileKey) || (raw.startsWith("app://") && key.endsWith(fileKey))) {
-          img.style.display = "none";
+          img.addClass("qdn-img-hidden");
           hidden = true;
         }
       } catch {
@@ -713,9 +722,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     if (naturalW <= 0 || naturalH <= 0) return;
 
     // 去掉 mermaid 写死的 max-width 内联样式，改由插件控制自适应
-    if (svg.style.maxWidth) svg.style.maxWidth = "";
-    svg.style.display = "block";
-    svg.style.margin = "0 auto";
+    if (svg.style.maxWidth) svg.style.removeProperty("max-width");
 
     const container = createDiv("mermaid-enhancer-container");
     const scroll = container.createDiv("mermaid-enhancer-scroll");
@@ -740,7 +747,7 @@ export default class QuickDailyNotePlugin extends Plugin {
   // ------------------------------------------------------------
 
   private getSvg(scroll: HTMLElement): SVGSVGElement | null {
-    return scroll.querySelector('svg[id^="mermaid-"], .mermaid svg') as SVGSVGElement | null;
+    return scroll.querySelector<SVGSVGElement>('svg[id^="mermaid-"], .mermaid svg');
   }
 
   private applyZoom(scroll: HTMLElement, state: ZoomState): void {
@@ -750,21 +757,22 @@ export default class QuickDailyNotePlugin extends Plugin {
       const pct = this.settings.mermaidMaxHeightPct;
       if (pct > 0 && state.naturalH > state.naturalW) {
         // 高图：限制高度，宽度按比例自动计算（不超过容器宽度），避免占用大量空间
-        svg.style.width = "";
+        svg.removeClass("me-fit-width", "me-zoom-px");
+        svg.addClass("me-fit-tall");
+        svg.style.removeProperty("width");
         svg.style.height = `${pct}vh`;
-        svg.style.maxWidth = "100%";
       } else {
         // 宽图：适应宽度，高度按比例自动计算
-        svg.style.width = "100%";
-        svg.style.height = "auto";
-        svg.style.maxWidth = "100%";
+        svg.removeClass("me-fit-tall", "me-zoom-px");
+        svg.addClass("me-fit-width");
+        svg.style.removeProperty("width");
+        svg.style.removeProperty("height");
       }
-      svg.style.maxHeight = "";
     } else {
-      svg.style.width = Math.max(1, Math.round(state.naturalW * state.scale)) + "px";
-      svg.style.height = "auto";
-      svg.style.maxWidth = "none";
-      svg.style.maxHeight = "";
+      svg.removeClass("me-fit-width", "me-fit-tall");
+      svg.addClass("me-zoom-px");
+      svg.style.removeProperty("height");
+      svg.style.width = `${Math.max(1, Math.round(state.naturalW * state.scale))}px`;
     }
     const percent = scroll.closest(".mermaid-enhancer-container")?.querySelector(".me-percent");
     if (percent) {
@@ -900,7 +908,7 @@ export default class QuickDailyNotePlugin extends Plugin {
       const clone = svg.cloneNode(true) as SVGSVGElement;
       clone.setAttribute("width", String(state.naturalW));
       clone.setAttribute("height", String(state.naturalH));
-      clone.style.cssText = "";
+      clone.removeAttribute("style");
       const xml = new XMLSerializer().serializeToString(clone);
       const filename = this.getFileName("svg");
       this.downloadBlob(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }), filename);
@@ -946,7 +954,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     const clone = svg.cloneNode(true) as SVGSVGElement;
     clone.setAttribute("width", String(state.naturalW));
     clone.setAttribute("height", String(state.naturalH));
-    clone.style.cssText = "";
+    clone.removeAttribute("style");
     this.normalizeForeignObjects(svg, clone, state);
     const xml = new XMLSerializer().serializeToString(clone);
     return URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
@@ -1011,9 +1019,18 @@ export default class QuickDailyNotePlugin extends Plugin {
 
   /** 提取 label 文本并保留 <br/> 换行 */
   private flattenLabelText(el: HTMLElement): string {
-    const tmp = document.createElement("div");
-    tmp.innerHTML = el.innerHTML.replace(/<br\s*\/?>/gi, "\n");
-    return tmp.textContent || "";
+    // 遍历子节点提取文本：<br/> 转换行，避免 innerHTML 拼接带来的注入风险
+    let out = "";
+    for (const node of Array.from(el.childNodes)) {
+      if (node.nodeName === "BR") {
+        out += "\n";
+      } else if (node.nodeType === Node.TEXT_NODE) {
+        out += node.textContent ?? "";
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        out += this.flattenLabelText(node as HTMLElement);
+      }
+    }
+    return out;
   }
 
   /** 取当前 Obsidian 主题的背景色，作为 PNG 画布底色 */
@@ -1064,11 +1081,13 @@ export default class QuickDailyNotePlugin extends Plugin {
       const svg = this.getSvg(scroll);
       if (!svg) continue;
       saved.set(scroll, { css: svg.style.cssText, overflow: scroll.style.overflow });
-      svg.style.width = "100%";
-      svg.style.height = "auto";
-      svg.style.maxWidth = "100%";
-      const container = scroll.closest(".mermaid-enhancer-container") as HTMLElement | null;
-      if (container) container.style.overflow = "visible";
+      // 清除内联尺寸，交给 @media print 中的 !important 规则接管
+      svg.style.removeProperty("width");
+      svg.style.removeProperty("height");
+      svg.style.removeProperty("max-width");
+      svg.style.removeProperty("max-height");
+      const container = scroll.closest(".mermaid-enhancer-container");
+      if (container) container.addClass("me-printing");
     }
     this.printStyles = saved;
   };
@@ -1078,8 +1097,8 @@ export default class QuickDailyNotePlugin extends Plugin {
       const svg = this.getSvg(scroll);
       if (svg) svg.style.cssText = saved.css;
       scroll.style.overflow = saved.overflow;
-      const container = scroll.closest(".mermaid-enhancer-container") as HTMLElement | null;
-      if (container) container.style.overflow = "";
+      const container = scroll.closest(".mermaid-enhancer-container");
+      if (container) container.removeClass("me-printing");
     });
     this.printStyles = null;
   };
@@ -1229,7 +1248,7 @@ export default class QuickDailyNotePlugin extends Plugin {
 
     const file = this.findDailyNote(folder, dateStr);
     if (file) {
-      this.app.workspace.getLeaf(false).openFile(file);
+      void this.app.workspace.getLeaf(false).openFile(file);
       return;
     }
     new CreateDailyNoteModal(this.app, this, dateStr).open();
@@ -1297,7 +1316,7 @@ export default class QuickDailyNotePlugin extends Plugin {
 
     const existing = this.app.vault.getAbstractFileByPath(filePath);
     if (existing instanceof TFile) {
-      this.app.workspace.getLeaf(false).openFile(existing);
+      void this.app.workspace.getLeaf(false).openFile(existing);
       new Notice(`日记已存在，已打开：${title}`);
       this.refreshViews();
       return;
@@ -1306,7 +1325,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     const file = await this.app.vault.create(filePath, `# ${title}\n`);
     // 创建后自动记录当天天气（异步，失败不影响创建）
     void this.appendWeatherToNote(file);
-    this.app.workspace.getLeaf(false).openFile(file);
+    void this.app.workspace.getLeaf(false).openFile(file);
     new Notice(`已创建日记：${title}`);
     this.refreshViews();
   }
@@ -1331,7 +1350,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     const { workspace } = this.app;
     const existing = workspace.getLeavesOfType(VIEW_TYPE);
     if (existing.length > 0) {
-      workspace.revealLeaf(existing[0]);
+      void workspace.revealLeaf(existing[0]);
       return;
     }
     const leaf = workspace.getRightLeaf(false);
@@ -1340,7 +1359,7 @@ export default class QuickDailyNotePlugin extends Plugin {
       return;
     }
     await leaf.setViewState({ type: VIEW_TYPE, active: true });
-    workspace.revealLeaf(leaf);
+    void workspace.revealLeaf(leaf);
   }
 
   /** 通知所有日历面板实例刷新 */
@@ -1450,15 +1469,15 @@ export default class QuickDailyNotePlugin extends Plugin {
           `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh`,
           { signal: ctrl.signal },
         );
-        const geo = await geoRes.json();
+        const geo = (await geoRes.json()) as OpenMeteoGeocoding;
         const hit = geo.results?.[0];
         if (!hit) return null;
         const res = await fetch(
           `https://api.open-meteo.com/v1/forecast?latitude=${hit.latitude}&longitude=${hit.longitude}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min,weather_code&timezone=auto&forecast_days=1`,
           { signal: ctrl.signal },
         );
-        const data = await res.json();
-        const code = data.current?.weather_code as number | undefined;
+        const data = (await res.json()) as OpenMeteoForecast;
+        const code = data.current?.weather_code;
         const w = WMO_WEATHER[code ?? -1] ?? { desc: "未知", icon: "" };
         const temp = Math.round(data.current?.temperature_2m ?? 0);
         const tmax = Math.round(data.daily?.temperature_2m_max?.[0] ?? temp);
@@ -1593,7 +1612,7 @@ export default class QuickDailyNotePlugin extends Plugin {
       notice.noticeEl.addClass("qdn-notice");
       notice.noticeEl.addEventListener("click", () => {
         notice.hide();
-        this.openCalendarView();
+        void this.openCalendarView();
       });
     }
 
@@ -1612,7 +1631,7 @@ export default class QuickDailyNotePlugin extends Plugin {
         notice.noticeEl.addClass("qdn-notice");
         notice.noticeEl.addEventListener("click", () => {
           notice.hide();
-          this.openCalendarView();
+          void this.openCalendarView();
         });
       }
     }
@@ -1752,7 +1771,7 @@ class CalendarView extends ItemView {
       });
       cell.addEventListener("dblclick", () => {
         // 双击打开/创建该日日记
-        this.plugin.openOrCreateDailyNote(dateStr);
+        void this.plugin.openOrCreateDailyNote(dateStr);
       });
     }
 
@@ -1827,7 +1846,7 @@ class CalendarView extends ItemView {
     dateLabel
       .createEl("button", { text: "打开日记", cls: "qdn-open-note-btn" })
       .addEventListener("click", () => {
-        this.plugin.openOrCreateDailyNote(this.selectedDate);
+        void this.plugin.openOrCreateDailyNote(this.selectedDate);
       });
 
     const items = this.plugin.settings.todos[this.selectedDate] ?? [];
@@ -1844,7 +1863,7 @@ class CalendarView extends ItemView {
         const checkbox = row.createEl("input", { type: "checkbox" });
         checkbox.checked = item.done;
         checkbox.addEventListener("change", () => {
-          this.plugin.toggleTodo(this.selectedDate, index);
+          void this.plugin.toggleTodo(this.selectedDate, index);
         });
 
         if (this.editingIndex === index) {
@@ -1857,7 +1876,7 @@ class CalendarView extends ItemView {
           input.addEventListener("keydown", (evt) => {
             if (evt.key === "Enter") {
               evt.preventDefault();
-              this.plugin.updateTodoText(this.selectedDate, index, input.value);
+                void this.plugin.updateTodoText(this.selectedDate, index, input.value);
               this.editingIndex = null;
               this.render();
             } else if (evt.key === "Escape") {
@@ -1867,7 +1886,7 @@ class CalendarView extends ItemView {
           });
           input.addEventListener("blur", () => {
             if (this.editingIndex !== index) return;
-            this.plugin.updateTodoText(this.selectedDate, index, input.value);
+            void this.plugin.updateTodoText(this.selectedDate, index, input.value);
             this.editingIndex = null;
           });
           window.setTimeout(() => {
@@ -1896,7 +1915,7 @@ class CalendarView extends ItemView {
         row
           .createEl("button", { text: "×", cls: "qdn-todo-delete" })
           .addEventListener("click", () => {
-            this.plugin.deleteTodo(this.selectedDate, index);
+            void this.plugin.deleteTodo(this.selectedDate, index);
           });
       });
     }
@@ -1909,14 +1928,14 @@ class CalendarView extends ItemView {
     input.addEventListener("keydown", (evt) => {
       if (evt.key === "Enter") {
         evt.preventDefault();
-        this.plugin.addTodo(this.selectedDate, input.value);
+        void this.plugin.addTodo(this.selectedDate, input.value);
         input.value = "";
       }
     });
     inputRow
       .createEl("button", { text: "添加", cls: "qdn-todo-add-btn" })
       .addEventListener("click", () => {
-        this.plugin.addTodo(this.selectedDate, input.value);
+        void this.plugin.addTodo(this.selectedDate, input.value);
         input.value = "";
       });
   }
@@ -1972,7 +1991,7 @@ class CreateDailyNoteModal extends Modal {
       new Notice("请输入日记名字");
       return;
     }
-    this.plugin.createDailyNote(trimmed, this.dateStr);
+    void this.plugin.createDailyNote(trimmed, this.dateStr);
     this.close();
   }
 
@@ -2231,7 +2250,7 @@ class ImageCropModal extends Modal {
       this.cropBtn = bar.createEl("button", { text: "裁剪", cls: "mod-cta" });
       this.cropBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        this.applyCrop();
+        void this.applyCrop();
       });
       // 拖拽完成前不显示裁剪按钮，避免误点
       this.cropBtn.hide();
@@ -2475,7 +2494,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "快捷日记设置" });
+    new Setting(containerEl).setName("快捷日记设置").setHeading();
 
     new Setting(containerEl)
       .setName("存放位置")
@@ -2503,7 +2522,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("h3", { text: "功能开关" });
+    new Setting(containerEl).setName("功能开关").setHeading();
 
     new Setting(containerEl)
       .setName("粘贴代码自动识别语言")
@@ -2584,7 +2603,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
         });
       });
 
-    containerEl.createEl("h3", { text: "Mermaid 图表" });
+    new Setting(containerEl).setName("Mermaid 图表").setHeading();
 
     new Setting(containerEl)
       .setName("初始显示方式")
@@ -2635,7 +2654,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
       text: "提示：更改图表设置仅对新渲染的图表生效，切换笔记或重新打开笔记即可看到效果。",
     });
 
-    containerEl.createEl("h3", { text: "天气记录" });
+    new Setting(containerEl).setName("天气记录").setHeading();
 
     new Setting(containerEl)
       .setName("创建日记时自动记录天气")
@@ -2662,7 +2681,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("h3", { text: "定时提醒" });
+    new Setting(containerEl).setName("定时提醒").setHeading();
 
     new Setting(containerEl)
       .setName("添加待办提醒")
@@ -2708,11 +2727,11 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
         });
       });
 
-    containerEl.createEl("h3", { text: "使用说明" });
+    new Setting(containerEl).setName("使用说明").setHeading();
 
     const help = containerEl.createDiv("qdn-help");
     const addSection = (title: string, items: string[]) => {
-      help.createEl("h4", { text: title });
+      new Setting(help).setName(title).setHeading();
       const ul = help.createEl("ul");
       for (const item of items) ul.createEl("li", { text: item });
     };

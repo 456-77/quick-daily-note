@@ -391,6 +391,11 @@
   margin: 0 auto;
 }
 
+/* 图片文件被删除后隐藏已渲染的实例（由插件切换类） */
+.qdn-img-hidden {
+  display: none;
+}
+
 .qdn-img-toolbar {
   position: absolute;
   top: 6px;
@@ -709,6 +714,26 @@
   display: block;
   height: auto;
   margin: 0 auto;
+}
+
+/* 显示模式由插件切换：适应宽度 / 高度受限 / 像素缩放 */
+.mermaid-enhancer-scroll svg.me-fit-width {
+  width: 100%;
+  max-width: 100%;
+}
+
+.mermaid-enhancer-scroll svg.me-fit-tall {
+  width: auto;
+  max-width: 100%;
+}
+
+.mermaid-enhancer-scroll svg.me-zoom-px {
+  max-width: none;
+}
+
+/* 打印时容器不裁剪图表 */
+.mermaid-enhancer-container.me-printing {
+  overflow: visible;
 }
 
 /* ---------------- 悬浮工具栏 ---------------- */

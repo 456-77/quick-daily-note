@@ -1,30 +1,155 @@
-# Quick Daily Note 快捷日记
+# Quick Daily Note
 
-一个将「快捷日记 + 日历待办 + 定时提醒」整合在一起的 Obsidian 插件，同时提供粘贴代码语言自动识别、粘贴图片自动保存、图片渲染增强与 Mermaid 图表增强，让日常记录更顺手。
+A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a calendar panel with per-day todos, scheduled reminders, and paste/rendering enhancements.
 
-## English Overview
+## Features
 
-**Quick Daily Note** is a daily-journal and todo companion for Obsidian:
+### 📝 Daily Notes
+- Click the calendar icon in the ribbon, or run the command "New daily note (enter name)" to create a note titled "date + name" — the folder and date format are configurable. If a note with the same name exists, it opens directly.
+- In the sidebar calendar panel, double-click a date to open or create that day's note.
 
-- **Daily notes** — create a dated note with one click (custom folder & date format); optional automatic weather recording (Open-Meteo, no API key)
-- **Calendar & todos** — a sidebar calendar panel manages todos per day: add, check off, edit, delete, and carry unfinished tasks to today
-- **Reminders** — scheduled prompts to add todos and review unfinished ones; click the notice to open the panel
-- **Weekly review** — insert a summary of the week's diaries and todos at the cursor
-- **Paste enhancements** — auto-detect the language of pasted code (30+ languages, zero dependencies); optionally save pasted images into a configurable folder
-- **Image enhancements** — auto-fitting images with a hover toolbar (crop / zoom / copy / rename / delete) and click-to-zoom
-- **Mermaid enhancements** — fit-to-width diagrams, zoom, SVG/PNG export, print/PDF-safe rendering
+### ✅ Calendar & Todos
+- The calendar panel manages todos per day: add with the input box (Enter), check off, double-click to edit text, ✎ to modify, × to delete.
+- When yesterday has unfinished todos, a "Carry over to today" banner appears at the top — one click moves them to today, marked as "carried over".
+- Below the calendar: stats for this month's diary days, consecutive diary days, and today's word count.
 
-**Requirements**: Obsidian v1.7.2+. **Platforms**: desktop & mobile.
+### ⏰ Reminders
+- Scheduled prompts to add a todo, or to check the day's unfinished todos; clicking the notification opens the calendar panel.
 
-**Install**: Community plugins → Browse → search "Quick Daily Note", or install via [BRAT](https://obsidian.md/plugins?id=obsidian42-brat) using `456-77/quick-daily-note`.
+### 📊 Weekly Review
+- The command "Generate weekly review" summarizes the week's diaries (days, word count, titles) and completed/uncompleted todos into Markdown, inserted at the cursor.
 
-**Privacy**: all data stays in your vault's `data.json`; the only optional network call is weather data from [open-meteo.com](https://open-meteo.com) (disabled by default).
+### ⌨️ Paste Enhancements
+- Auto-detect the language of pasted code (30+ languages, zero dependencies) and wrap it in a fenced code block; plain text, single-line weak matches, and pastes inside code blocks are left alone.
+- Optionally save pasted images into a configurable folder (vault-relative path; empty = vault root) and insert the link at the cursor (off by default).
 
-中文文档如下。
+### 🖼️ Image Enhancements
+- Images fit the note width automatically; overly tall images are height-limited.
+- Hover a rendered image for a toolbar: crop, zoom, copy, rename, delete (deleting also removes the references in notes and moves the file to the system trash).
+- Click an image to view it enlarged, with crop and other actions in the modal toolbar.
+
+### 📈 Mermaid Enhancements
+- Diagrams fit the container width (or render at original size), with a configurable height limit for tall diagrams.
+- Toolbar on the diagram: zoom in/out, reset, download as SVG or PNG (export scale configurable).
+- Diagrams adapt to the page width when printing or exporting to PDF — never clipped.
+
+### 🌤️ Weather Recording
+- When enabled, the current day's weather is fetched and written below the note title after creating a daily note (data from Open-Meteo, no API key; failures never block note creation).
+
+## Screenshots
+
+![Main view](image.png)
+![Settings](image-1.png)
+![Commands](image-2.png)
+
+## Installation
+
+### Community Plugin Browser (once listed)
+Settings → Community plugins → Browse, then search for **Quick Daily Note**.
+
+### BRAT (before listing)
+1. Install the [BRAT](obsidian://show-plugin?id=obsidian42-brat) plugin.
+2. Run the command `BRAT: Add a beta plugin for testing` and enter `456-77/quick-daily-note`.
+3. Enable Quick Daily Note.
+
+### Manual Install
+Download the latest release from GitHub, and copy `main.js`, `manifest.json`, and `styles.css` into `<vault>/.obsidian/plugins/quick-daily-note/`, then enable the plugin in Settings.
+
+## Usage
+
+### Commands
+
+| Command | Description |
+| --- | --- |
+| New daily note (enter name) | Create a note titled "date + name"; opens the existing note if present |
+| Open calendar & todo panel | Open the calendar and todo panel |
+| Set heading level for selection | Normalize headings in the selected text block (toggleable in settings) |
+| Generate weekly review | Summarize the week's diaries and todos at the cursor |
+
+### Image Toolbar Buttons
+
+| Button | Action |
+| --- | --- |
+| ✂ | Crop |
+| ⛶ | Zoom in |
+| ⧉ | Copy |
+| ✎ | Rename |
+| 🗑 | Delete (removes note references; file goes to the trash) |
+
+## Settings
+
+### Daily Notes
+
+| Setting | Description |
+| --- | --- |
+| Storage folder | Folder for diary files; empty = vault root |
+| Date format | moment format, e.g. `YYYY-MM-DD` |
+
+### Feature Toggles
+
+| Setting | Description |
+| --- | --- |
+| Auto-detect code language on paste | On by default |
+| Set heading level for selection | On by default |
+| Save pasted images to a folder | Off by default |
+| Image storage folder | Defaults to `attachments` |
+| Image rendering enhancements | On by default |
+| Max image height | Percentage of viewport; 0 = unlimited; 70% by default |
+
+### Mermaid Diagrams
+
+| Setting | Description |
+| --- | --- |
+| Initial display mode | Fit width / original size; fit width by default |
+| PNG export scale | 1x / 2x / 3x; 2x by default |
+| Max diagram height | Percentage of viewport; 0 = unlimited; 60% by default |
+
+### Weather
+
+| Setting | Description |
+| --- | --- |
+| Record weather when creating daily notes | Off by default |
+| City | e.g. Beijing, Shanghai |
+
+### Reminders
+
+| Setting | Description |
+| --- | --- |
+| Add-todo reminder | Off by default; 08:00 by default |
+| Unfinished-todo check | Off by default; 21:00 by default |
+
+## Data & Privacy
+
+- All data is stored in your vault's `data.json`; nothing is uploaded to any server.
+- The only network request is weather data from [open-meteo.com](https://open-meteo.com) when weather recording is enabled (public API, no key, off by default).
+
+## Compatibility
+
+- Requires Obsidian v1.7.2 or later.
+- Works on desktop and mobile.
+
+## Development
+
+```bash
+npm install
+npm run build   # tsc type check + esbuild bundle
+```
+
+Build output: `main.js`, `manifest.json`, `styles.css`.
+
+## Support & Feedback
+
+Issues and suggestions are welcome at [GitHub Issues](https://github.com/456-77/quick-daily-note/issues).
+
+## License
+
+[MIT](./LICENSE)
 
 ---
 
-## ✨ 功能特性
+# 中文文档
+
+## 功能特性
 
 ### 📝 快捷日记
 - 点击左侧功能区日历图标，或运行命令「新建日记（输入名字）」，即可创建标题为「日期 + 名字」的日记，日期格式与存放文件夹可自定义，同名日记直接打开。
@@ -57,12 +182,6 @@
 
 ### 🌤️ 天气记录
 - 创建日记时自动获取当天天气并写入标题下方（数据来自 Open-Meteo，无需 API key，默认关闭，失败不影响创建）。
-
-## 📸 截图
-
-![页面效果](image.png)
-![设置页面](image-1.png)
-![命令行](image-2.png)
 
 ## 安装
 
@@ -162,7 +281,3 @@ npm run build   # tsc 类型检查 + esbuild 打包
 ## 支持与反馈
 
 遇到问题或想提建议，欢迎提交 [GitHub Issues](https://github.com/456-77/quick-daily-note/issues)。
-
-## License
-
-[MIT](./LICENSE)

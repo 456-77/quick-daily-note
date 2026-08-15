@@ -10,15 +10,42 @@ import {
   Notice,
   Plugin,
   PluginSettingTab,
+  requestUrl,
   Setting,
   TAbstractFile,
   TFile,
   TFolder,
   WorkspaceLeaf,
-  moment,
+  moment as obsidianMoment,
   normalizePath,
 } from "obsidian";
 import { detectLanguage } from "./languageDetect";
+
+/**
+ * moment 类型兜底：obsidian 的 moment re-export 在部分审核环境（新版
+ * TypeScript / 依赖解析差异）会退化为 any，这里显式声明所用到的 API 形状。
+ */
+interface QdnMoment {
+  format(format?: string): string;
+  startOf(unit: string): QdnMoment;
+  endOf(unit: string): QdnMoment;
+  clone(): QdnMoment;
+  add(amount: number, unit: string): QdnMoment;
+  subtract(amount: number, unit: string): QdnMoment;
+  isBefore(other: QdnMoment | string, unit?: string): boolean;
+  isAfter(other: QdnMoment | string, unit?: string): boolean;
+  isSame(other: QdnMoment | string, unit?: string): boolean;
+  isValid(): boolean;
+  date(): number;
+  month(): number;
+}
+
+interface QdnMomentStatic {
+  (): QdnMoment;
+  (input: string, format: string, strict?: boolean): QdnMoment;
+}
+
+const moment: QdnMomentStatic = obsidianMoment as unknown as QdnMomentStatic;
 
 const VIEW_TYPE = "quick-daily-note-view";
 
@@ -216,7 +243,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "create-quick-daily-note",
+      id: "create-daily-note",
       name: "新建日记（输入名字）",
       callback: () => this.openCreateModal(),
     });
@@ -240,7 +267,8 @@ export default class QuickDailyNotePlugin extends Plugin {
     // 粘贴代码时自动识别语言并生成代码块
     this.registerEvent(
       this.app.workspace.on("editor-paste", (evt, editor) => {
-        this.handleEditorPaste(evt, editor);
+        if (evt.defaultPrevented) return;
+        if (this.handleEditorPaste(evt, editor)) evt.preventDefault();
       })
     );
 
@@ -314,7 +342,7 @@ export default class QuickDailyNotePlugin extends Plugin {
       this.imageObserver = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
           for (const node of Array.from(mutation.addedNodes)) {
-            if (node instanceof Element) this.processImageNode(node);
+            if (node.instanceOf(Element)) this.processImageNode(node);
           }
         }
       });
@@ -329,7 +357,7 @@ export default class QuickDailyNotePlugin extends Plugin {
   /** 查找节点及其子树中可增强的图片 */
   private processImageNode(node: Element): void {
     const imgs: HTMLImageElement[] = [];
-    if (node instanceof HTMLImageElement) imgs.push(node);
+    if (node.instanceOf(HTMLImageElement)) imgs.push(node);
     imgs.push(...Array.from(node.querySelectorAll("img")));
     for (const img of imgs) {
       if (!this.processedImages.has(img) && img.isConnected) this.enhanceImage(img);
@@ -669,7 +697,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.mermaidObserver = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         for (const node of Array.from(mutation.addedNodes)) {
-          if (node instanceof Element) this.processMermaidNode(node);
+          if (node.instanceOf(Element)) this.processMermaidNode(node);
         }
       }
     });
@@ -893,13 +921,13 @@ export default class QuickDailyNotePlugin extends Plugin {
 
   private downloadBlob(blob: Blob, filename: string): void {
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
+    const a = createEl("a");
     a.href = url;
     a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    window.setTimeout(() => URL.revokeObjectURL(url), 2000);
     this.diagramCounter++;
   }
 
@@ -929,7 +957,7 @@ export default class QuickDailyNotePlugin extends Plugin {
         img.onerror = () => reject(new Error("PNG 生成失败（SVG 加载失败）"));
         img.src = url;
       });
-      const canvas = document.createElement("canvas");
+      const canvas = createEl("canvas");
       canvas.width = Math.round(state.naturalW * scale);
       canvas.height = Math.round(state.naturalH * scale);
       const ctx = canvas.getContext("2d");
@@ -1108,37 +1136,37 @@ export default class QuickDailyNotePlugin extends Plugin {
    * 1. 启用时，图片粘贴自动保存到指定目录并插入链接；
    * 2. 粘贴内容明显是代码且光标不在代码块内时，识别语言并生成代码块。
    */
-  private handleEditorPaste(evt: ClipboardEvent, editor: Editor) {
+  /** 返回是否已处理该粘贴事件（true 时由调用方 preventDefault） */
+  private handleEditorPaste(evt: ClipboardEvent, editor: Editor): boolean {
     if (this.settings.autoSavePastedImages) {
       const images = this.pastedImages(evt);
       if (images.length > 0) {
-        evt.preventDefault();
         void this.savePastedImages(images, editor);
-        return;
+        return true;
       }
     }
 
-    if (!this.settings.autoDetectCodeLang) return;
-    if (evt.defaultPrevented) return; // 已被其他插件处理
+    if (!this.settings.autoDetectCodeLang) return false;
+    if (evt.defaultPrevented) return false; // 已被其他插件处理
 
     const data = evt.clipboardData;
-    if (!data || data.files.length > 0) return; // 文件粘贴不干预
+    if (!data || data.files.length > 0) return false; // 文件粘贴不干预
 
     const text = data.getData("text/plain");
-    if (!text.trim()) return;
+    if (!text.trim()) return false;
 
     // 整块复制了已有围栏的代码，保持原样
-    if (/^\s*(```|~~~)/.test(text)) return;
+    if (/^\s*(```|~~~)/.test(text)) return false;
 
     // 光标已在代码块内：交给编辑器默认行为
-    if (isInsideCodeBlock(editor, editor.getCursor())) return;
+    if (isInsideCodeBlock(editor, editor.getCursor())) return false;
 
     const lang = detectLanguage(text, text.includes("\n"));
-    if (!lang) return;
+    if (!lang) return false;
 
-    evt.preventDefault();
     insertCodeBlock(editor, text, lang);
     new Notice(`已识别为 ${lang} 代码块`, 2500);
+    return true;
   }
 
   /** 从剪贴板提取图片文件 */
@@ -1462,30 +1490,20 @@ export default class QuickDailyNotePlugin extends Plugin {
   /** 获取指定城市当天天气（Open-Meteo，无需 API key），失败返回 null */
   async fetchWeather(city: string): Promise<string | null> {
     try {
-      const ctrl = new AbortController();
-      const timer = window.setTimeout(() => ctrl.abort(), 8000);
-      try {
-        const geoRes = await fetch(
-          `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh`,
-          { signal: ctrl.signal },
-        );
-        const geo = (await geoRes.json()) as OpenMeteoGeocoding;
-        const hit = geo.results?.[0];
-        if (!hit) return null;
-        const res = await fetch(
-          `https://api.open-meteo.com/v1/forecast?latitude=${hit.latitude}&longitude=${hit.longitude}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min,weather_code&timezone=auto&forecast_days=1`,
-          { signal: ctrl.signal },
-        );
-        const data = (await res.json()) as OpenMeteoForecast;
-        const code = data.current?.weather_code;
-        const w = WMO_WEATHER[code ?? -1] ?? { desc: "未知", icon: "" };
-        const temp = Math.round(data.current?.temperature_2m ?? 0);
-        const tmax = Math.round(data.daily?.temperature_2m_max?.[0] ?? temp);
-        const tmin = Math.round(data.daily?.temperature_2m_min?.[0] ?? temp);
-        return `${w.icon} ${w.desc} ${temp}°C（${tmin}~${tmax}°C）`;
-      } finally {
-        window.clearTimeout(timer);
-      }
+      const geo = (await requestUrl({
+        url: `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh`,
+      })).json as OpenMeteoGeocoding;
+      const hit = geo.results?.[0];
+      if (!hit) return null;
+      const data = (await requestUrl({
+        url: `https://api.open-meteo.com/v1/forecast?latitude=${hit.latitude}&longitude=${hit.longitude}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min,weather_code&timezone=auto&forecast_days=1`,
+      })).json as OpenMeteoForecast;
+      const code = data.current?.weather_code;
+      const w = WMO_WEATHER[code ?? -1] ?? { desc: "未知", icon: "" };
+      const temp = Math.round(data.current?.temperature_2m ?? 0);
+      const tmax = Math.round(data.daily?.temperature_2m_max?.[0] ?? temp);
+      const tmin = Math.round(data.daily?.temperature_2m_min?.[0] ?? temp);
+      return `${w.icon} ${w.desc} ${temp}°C（${tmin}~${tmax}°C）`;
     } catch (e) {
       console.warn("Quick Daily Note: 获取天气失败", e);
       return null;
@@ -1609,8 +1627,8 @@ export default class QuickDailyNotePlugin extends Plugin {
         "该添加今天的待办事项了，点击打开日历面板",
         10000
       );
-      notice.noticeEl.addClass("qdn-notice");
-      notice.noticeEl.addEventListener("click", () => {
+      notice.messageEl.addClass("qdn-notice");
+      notice.messageEl.addEventListener("click", () => {
         notice.hide();
         void this.openCalendarView();
       });
@@ -1628,8 +1646,8 @@ export default class QuickDailyNotePlugin extends Plugin {
           `今天还有 ${pendingCount} 项待办未完成，点击打开日历面板`,
           10000
         );
-        notice.noticeEl.addClass("qdn-notice");
-        notice.noticeEl.addEventListener("click", () => {
+        notice.messageEl.addClass("qdn-notice");
+        notice.messageEl.addEventListener("click", () => {
           notice.hide();
           void this.openCalendarView();
         });
@@ -2314,7 +2332,7 @@ class ImageCropModal extends Modal {
     const sh = Math.max(1, Math.round(this.rect.h * scaleY));
 
     try {
-      const canvas = document.createElement("canvas");
+      const canvas = createEl("canvas");
       canvas.width = sw;
       canvas.height = sh;
       const ctx = canvas.getContext("2d");
@@ -2449,7 +2467,7 @@ class DeleteImageModal extends Modal {
     try {
       // 先记录引用该图片的笔记（文件删除后 metadataCache 会更新，需提前收集）
       const refNotes = this.plugin.collectImageRefs(this.file);
-      await this.plugin.app.vault.trash(this.file, true);
+      await this.plugin.app.fileManager.trashFile(this.file);
       // 隐藏页面中已渲染的该图片
       this.plugin.refreshRemovedImage(this.file);
 
@@ -2482,12 +2500,33 @@ class DeleteImageModal extends Modal {
   }
 }
 
+/** 声明式设置条目（Obsidian 1.13+ 设置搜索 API 的最小形状） */
+interface QdnSettingDefinition {
+  name: string;
+  desc?: string;
+}
+
 class QuickDailyNoteSettingTab extends PluginSettingTab {
   plugin: QuickDailyNotePlugin;
 
   constructor(app: App, plugin: QuickDailyNotePlugin) {
     super(app, plugin);
     this.plugin = plugin;
+  }
+
+  /** 声明式设置定义：让设置项出现在 Obsidian 1.13+ 的设置搜索中 */
+  getSettingDefinitions(): QdnSettingDefinition[] {
+    return [
+      { name: "存放位置", desc: "日记文件的存放文件夹，留空则存放在库根目录" },
+      { name: "日期格式", desc: "moment 日期格式，例如：YYYY-MM-DD" },
+      { name: "粘贴代码自动识别语言", desc: "粘贴代码时自动识别编程语言并生成代码块" },
+      { name: "选中文本设置标题等级", desc: "将选中文本块内的标题统一调整到指定等级" },
+      { name: "粘贴图片保存到指定目录", desc: "粘贴图片自动保存到指定目录并插入链接" },
+      { name: "图片渲染增强", desc: "图片自适应宽度，工具栏可裁剪、放大、复制、重命名、删除" },
+      { name: "Mermaid 图表", desc: "初始显示方式、PNG 导出倍率、图表最大高度" },
+      { name: "创建日记时自动记录天气", desc: "创建日记后自动写入当天天气（Open-Meteo）" },
+      { name: "定时提醒", desc: "添加待办提醒与未完成待办检查" },
+    ];
   }
 
   display() {

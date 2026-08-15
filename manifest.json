@@ -1,7 +1,7 @@
 {
   "id": "quick-daily-note",
   "name": "Quick Daily Note",
-  "version": "2.2.5",
+  "version": "2.2.6",
   "minAppVersion": "1.7.2",
   "description": "快捷创建日记（标题为日期+自定义名字）；日历面板按日期管理待办；定时提醒；标题等级调整；粘贴代码自动识别语言；粘贴图片自动保存到指定目录；图片渲染增强（裁剪/放大/复制/重命名/删除）；Mermaid 图表增强（缩放/下载/PDF 优化）.",
   "author": "shuiyi",

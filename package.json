@@ -1,6 +1,6 @@
 {
   "name": "quick-daily-note",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "快捷日记 + 待办 + 粘贴代码语言识别 + 图片增强 + Mermaid 图表增强（整合原 Mermaid Enhancer 插件）。",
   "main": "main.js",
   "scripts": {

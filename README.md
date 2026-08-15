@@ -24,6 +24,7 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 ### ⌨️ Paste Enhancements
 - Auto-detect the language of pasted code (30+ languages, zero dependencies) and wrap it in a fenced code block; plain text, single-line weak matches, and pastes inside code blocks are left alone.
 - Optionally save pasted images into a configurable folder (vault-relative path; empty = vault root) and insert the link at the cursor (off by default).
+- **File explorer paste** — copy/cut files in the sidebar file explorer with `Ctrl/Cmd+C` / `Ctrl/Cmd+X`, then paste them into a target folder with `Ctrl/Cmd+V` (VS Code style, toggleable).
 
 ### 🖼️ Image Enhancements
 - Images fit the note width automatically; overly tall images are height-limited.
@@ -39,7 +40,7 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 - When enabled, the current day's weather is fetched and written below the note title after creating a daily note (data from Open-Meteo, no API key; failures never block note creation).
 
 ### 🖼️ App Background
-- Set the whole interface background to a custom image from your vault, with adjustable opacity.
+- Set the whole interface background to a custom image or video from your vault — videos (mp4/webm/ogv) play as a dynamic wallpaper — with full adjustments: opacity, blur, brightness, contrast, position, scale and fit mode.
 
 ## Screenshots
 
@@ -97,6 +98,8 @@ Download the latest release from GitHub, and copy `main.js`, `manifest.json`, an
 | Auto-detect code language on paste | On by default |
 | Set heading level for selection | On by default |
 | Save pasted images to a folder | Off by default |
+| Save pasted files to a folder | Off by default |
+| File explorer paste enhancement | Copy/cut files with Ctrl/Cmd+C/X, paste with Ctrl/Cmd+V in the file explorer; on by default |
 | Image storage folder | Defaults to `attachments` |
 | Image rendering enhancements | On by default |
 | Max image height | Percentage of viewport; 0 = unlimited; 70% by default |
@@ -114,8 +117,14 @@ Download the latest release from GitHub, and copy `main.js`, `manifest.json`, an
 | Setting | Description |
 | --- | --- |
 | Enable background image | Off by default; restores the theme background when disabled |
-| Image path | Vault-relative path, e.g. `attachments/bg.png` |
-| Opacity | 30% – 100%; lower values keep text readable |
+| Image path | Vault-relative path; images (png/jpg/webp/gif) or videos (mp4/webm) |
+| Opacity | 10% – 100%; lower values keep text readable |
+| Blur radius | 0 – 30 px Gaussian blur |
+| Brightness | 20% – 200% (100% = original) |
+| Contrast | 20% – 200% (100% = original) |
+| Horizontal / vertical position | 0% – 100% image alignment |
+| Scale | 50% – 250% (100% = original size) |
+| Fit mode | Cover (fill the window, cropped) / contain (whole image visible) |
 
 ### Weather
 

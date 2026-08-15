@@ -871,10 +871,12 @@ body.qdn-bg-image::before {
   inset: 0;
   z-index: -1;
   background-image: var(--qdn-bg-url);
-  background-size: cover;
-  background-position: center;
+  background-size: var(--qdn-bg-fit, cover);
+  background-position: var(--qdn-bg-pos-x, 50%) var(--qdn-bg-pos-y, 50%);
   background-repeat: no-repeat;
   opacity: var(--qdn-bg-opacity, 0.25);
+  filter: blur(var(--qdn-bg-blur, 0px)) brightness(var(--qdn-bg-brightness, 100%)) contrast(var(--qdn-bg-contrast, 100%));
+  transform: scale(var(--qdn-bg-scale, 1));
   pointer-events: none;
 }
 
@@ -893,4 +895,19 @@ body.qdn-bg-image .workspace-ribbon,
 body.qdn-bg-image .status-bar,
 body.qdn-bg-image .titlebar {
   background-color: transparent;
+}
+
+/* 动态壁纸（视频）承载层，调节变量与图片背景共用 */
+#qdn-bg-video {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  height: 100%;
+  object-fit: var(--qdn-bg-fit, cover);
+  object-position: var(--qdn-bg-pos-x, 50%) var(--qdn-bg-pos-y, 50%);
+  opacity: var(--qdn-bg-opacity, 0.25);
+  filter: blur(var(--qdn-bg-blur, 0px)) brightness(var(--qdn-bg-brightness, 100%)) contrast(var(--qdn-bg-contrast, 100%));
+  transform: scale(var(--qdn-bg-scale, 1));
+  pointer-events: none;
 }

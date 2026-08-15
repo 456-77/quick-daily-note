@@ -12,9 +12,12 @@ import {
   PluginSettingTab,
   requestUrl,
   Setting,
+  SliderComponent,
+  SuggestModal,
   TAbstractFile,
   TFile,
   TFolder,
+  TextComponent,
   WorkspaceLeaf,
   moment as obsidianMoment,
   normalizePath,
@@ -73,6 +76,10 @@ interface QuickDailyNoteSettings {
   enableHeadingLevelCommand: boolean;
   /** 粘贴图片自动保存到指定目录 */
   autoSavePastedImages: boolean;
+  /** 粘贴其他文件自动保存到指定目录 */
+  autoSavePastedFiles: boolean;
+  /** 文件管理器粘贴增强（资源管理器式 Ctrl+C/V） */
+  explorerPasteEnabled: boolean;
   /** 粘贴图片保存目录（vault 内相对路径） */
   pastedImageFolder: string;
   /** 图片渲染增强 */
@@ -95,6 +102,20 @@ interface QuickDailyNoteSettings {
   bgImagePath: string;
   /** 背景图片不透明度 0-1 */
   bgOpacity: number;
+  /** 背景图片模糊半径（px） */
+  bgBlur: number;
+  /** 背景图片亮度（%） */
+  bgBrightness: number;
+  /** 背景图片对比度（%） */
+  bgContrast: number;
+  /** 背景图片水平位置（%） */
+  bgPosX: number;
+  /** 背景图片垂直位置（%） */
+  bgPosY: number;
+  /** 背景图片缩放（%，100=原始大小） */
+  bgScale: number;
+  /** 背景图片适配方式：cover=铺满裁剪 contain=完整显示 */
+  bgFit: "cover" | "contain";
 }
 
 const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
@@ -108,6 +129,8 @@ const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
   autoDetectCodeLang: true,
   enableHeadingLevelCommand: true,
   autoSavePastedImages: false,
+  autoSavePastedFiles: false,
+  explorerPasteEnabled: true,
   pastedImageFolder: "attachments",
   imageEnhancerEnabled: true,
   imageMaxHeightPct: 70,
@@ -119,6 +142,13 @@ const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
   bgEnabled: false,
   bgImagePath: "",
   bgOpacity: 0.6,
+  bgBlur: 0,
+  bgBrightness: 100,
+  bgContrast: 100,
+  bgPosX: 50,
+  bgPosY: 50,
+  bgScale: 100,
+  bgFit: "cover",
 };
 
 /** WMO 天气代码 -> 描述与图标（Open-Meteo） */
@@ -224,6 +254,9 @@ const MIME_BY_EXT: Record<string, string> = {
   tiff: "image/tiff",
 };
 
+/** 视频扩展名集合（用于动态壁纸） */
+const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "ogv"]);
+
 export default class QuickDailyNotePlugin extends Plugin {
   settings: QuickDailyNoteSettings = DEFAULT_SETTINGS;
   /** 定时器 id */
@@ -293,6 +326,9 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => this.processMermaids());
 
     document.addEventListener("click", this.zoomClickHandler, true);
+    document.addEventListener("keydown", this.handleExplorerKeys);
+    document.addEventListener("click", this.handleExplorerClick);
+    document.addEventListener("paste", this.handleExplorerPaste);
 
     window.addEventListener("beforeprint", this.onBeforePrint);
     window.addEventListener("afterprint", this.onAfterPrint);
@@ -308,11 +344,22 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.mermaidObserver?.disconnect();
     this.mermaidObserver = null;
     document.removeEventListener("click", this.zoomClickHandler, true);
+    document.removeEventListener("keydown", this.handleExplorerKeys);
+    document.removeEventListener("click", this.handleExplorerClick);
+    document.removeEventListener("paste", this.handleExplorerPaste);
     window.removeEventListener("beforeprint", this.onBeforePrint);
     window.removeEventListener("afterprint", this.onAfterPrint);
     document.body.toggleClass("qdn-bg-image", false);
     document.body.style.removeProperty("--qdn-bg-url");
     document.body.style.removeProperty("--qdn-bg-opacity");
+    document.body.style.removeProperty("--qdn-bg-blur");
+    document.body.style.removeProperty("--qdn-bg-brightness");
+    document.body.style.removeProperty("--qdn-bg-contrast");
+    document.body.style.removeProperty("--qdn-bg-pos-x");
+    document.body.style.removeProperty("--qdn-bg-pos-y");
+    document.body.style.removeProperty("--qdn-bg-scale");
+    document.body.style.removeProperty("--qdn-bg-fit");
+    this.destroyBgVideo();
   }
 
   async loadSettings() {
@@ -369,25 +416,82 @@ export default class QuickDailyNotePlugin extends Plugin {
 
   /** 应用全局背景图片设置（注入 CSS 变量并切换 body 类） */
   applyBackground(): void {
-    const path = this.settings.bgImagePath.trim();
-    const enabled = this.settings.bgEnabled && path.length > 0;
+    const s = this.settings;
+    const path = s.bgImagePath.trim();
+    const enabled = s.bgEnabled && path.length > 0;
     document.body.toggleClass("qdn-bg-image", enabled);
     if (!enabled) {
       document.body.style.removeProperty("--qdn-bg-url");
       document.body.style.removeProperty("--qdn-bg-opacity");
+      document.body.style.removeProperty("--qdn-bg-blur");
+      document.body.style.removeProperty("--qdn-bg-brightness");
+      document.body.style.removeProperty("--qdn-bg-contrast");
+      document.body.style.removeProperty("--qdn-bg-pos-x");
+      document.body.style.removeProperty("--qdn-bg-pos-y");
+      document.body.style.removeProperty("--qdn-bg-scale");
+      document.body.style.removeProperty("--qdn-bg-fit");
+      this.destroyBgVideo();
       return;
     }
     const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
     if (!file || !("extension" in file)) {
-      new Notice("背景图片不存在，请检查设置中的图片路径");
-      this.settings.bgEnabled = false;
+      new Notice("背景文件不存在，请检查设置中的图片路径");
+      s.bgEnabled = false;
       void this.saveSettings();
       document.body.toggleClass("qdn-bg-image", false);
+      this.destroyBgVideo();
       return;
     }
     const url = this.app.vault.adapter.getResourcePath(normalizePath(path));
-    document.body.style.setProperty("--qdn-bg-url", `url("${url}")`);
-    document.body.style.setProperty("--qdn-bg-opacity", String(this.settings.bgOpacity));
+    const bgFile = file as TFile;
+    if (VIDEO_EXTENSIONS.has(bgFile.extension.toLowerCase())) {
+      // 动态壁纸：视频元素承载，其余调节变量照常注入
+      document.body.style.removeProperty("--qdn-bg-url");
+      this.showBgVideo(url);
+    } else {
+      this.destroyBgVideo();
+      document.body.style.setProperty("--qdn-bg-url", `url("${url}")`);
+    }
+    document.body.style.setProperty("--qdn-bg-opacity", String(s.bgOpacity));
+    document.body.style.setProperty("--qdn-bg-blur", `${s.bgBlur}px`);
+    document.body.style.setProperty("--qdn-bg-brightness", `${s.bgBrightness}%`);
+    document.body.style.setProperty("--qdn-bg-contrast", `${s.bgContrast}%`);
+    document.body.style.setProperty("--qdn-bg-pos-x", `${s.bgPosX}%`);
+    document.body.style.setProperty("--qdn-bg-pos-y", `${s.bgPosY}%`);
+    document.body.style.setProperty("--qdn-bg-scale", String(s.bgScale / 100));
+    document.body.style.setProperty("--qdn-bg-fit", s.bgFit);
+  }
+
+  /** 动态壁纸视频元素 */
+  private bgMediaEl: HTMLVideoElement | null = null;
+
+  /** 创建并播放动态壁纸视频 */
+  private showBgVideo(url: string): void {
+    if (!this.bgMediaEl) {
+      const video = createEl("video");
+      video.id = "qdn-bg-video";
+      video.muted = true;
+      video.loop = true;
+      video.autoplay = true;
+      video.playsInline = true;
+      document.body.appendChild(video);
+      this.bgMediaEl = video;
+    }
+    if (this.bgMediaEl.getAttribute("src") !== url) {
+      this.bgMediaEl.setAttribute("src", url);
+      void this.bgMediaEl.play().catch(() => {
+        // 自动播放被浏览器拦截时静默，用户可手动刷新页面重试
+      });
+    }
+  }
+
+  /** 移除动态壁纸视频元素 */
+  private destroyBgVideo(): void {
+    if (!this.bgMediaEl) return;
+    this.bgMediaEl.pause();
+    this.bgMediaEl.removeAttribute("src");
+    this.bgMediaEl.remove();
+    this.bgMediaEl = null;
   }
 
   /** 查找节点及其子树中可增强的图片 */
@@ -1174,11 +1278,18 @@ export default class QuickDailyNotePlugin extends Plugin {
    */
   /** 返回是否已处理该粘贴事件（true 时由调用方 preventDefault） */
   private handleEditorPaste(evt: ClipboardEvent, editor: Editor): boolean {
-    if (this.settings.autoSavePastedImages) {
-      const images = this.pastedImages(evt);
-      if (images.length > 0) {
-        void this.savePastedImages(images, editor);
-        return true;
+    if (this.settings.autoSavePastedImages || this.settings.autoSavePastedFiles) {
+      const files = this.pastedFiles(evt);
+      if (files.length > 0) {
+        const images = files.filter((f) => f.type.startsWith("image/"));
+        const others = files.filter((f) => !f.type.startsWith("image/"));
+        const saveImages = images.length > 0 && this.settings.autoSavePastedImages;
+        const saveOthers = others.length > 0 && this.settings.autoSavePastedFiles;
+        if (saveImages || saveOthers) {
+          if (saveImages) void this.savePastedImages(images, editor);
+          if (saveOthers) void this.savePastedFiles(others, editor);
+          return true;
+        }
       }
     }
 
@@ -1205,11 +1316,11 @@ export default class QuickDailyNotePlugin extends Plugin {
     return true;
   }
 
-  /** 从剪贴板提取图片文件 */
-  private pastedImages(evt: ClipboardEvent): File[] {
+  /** 从剪贴板提取所有文件 */
+  private pastedFiles(evt: ClipboardEvent): File[] {
     const data = evt.clipboardData;
     if (!data || data.files.length === 0) return [];
-    return Array.from(data.files).filter((f) => f.type.startsWith("image/"));
+    return Array.from(data.files);
   }
 
   /** 将图片保存到设置目录，并在光标处插入图片链接 */
@@ -1236,6 +1347,223 @@ export default class QuickDailyNotePlugin extends Plugin {
     } catch (e) {
       console.error("Quick Daily Note: 保存粘贴图片失败", e);
       new Notice("保存粘贴图片失败，请查看控制台");
+    }
+  }
+
+  /** 将非图片文件保存到设置目录，并在光标处插入 wiki 链接 */
+  private async savePastedFiles(files: File[], editor: Editor) {
+    try {
+      const folder = normalizePath(this.settings.pastedImageFolder.trim());
+      await this.ensureFolder(folder);
+
+      const links: string[] = [];
+      for (const file of files) {
+        const ext = this.fileExtension(file);
+        const name = await this.uniqueAttachmentName(folder, ext);
+        const buffer = await file.arrayBuffer();
+        await this.app.vault.createBinary(normalizePath(`${folder}/${name}`), buffer);
+        links.push(`[[${name}]]`);
+      }
+
+      const cursor = editor.getCursor();
+      const line = editor.getLine(cursor.line);
+      const prefix = line.slice(0, cursor.ch).trim() ? "\n" : "";
+      const suffix = line.slice(cursor.ch).trim() ? "\n" : "";
+      editor.replaceSelection(`${prefix}${links.join(" ")}${suffix}`);
+      new Notice(`已保存 ${files.length} 个文件到 ${folder || "库根目录"}`, 3000);
+    } catch (e) {
+      console.error("Quick Daily Note: 保存粘贴文件失败", e);
+      new Notice("保存粘贴文件失败，请查看控制台");
+    }
+  }
+
+  /** 从文件名提取扩展名，无扩展名时用 bin 兜底 */
+  private fileExtension(file: File): string {
+    const dot = file.name.lastIndexOf(".");
+    const ext = dot >= 0 ? file.name.slice(dot + 1).toLowerCase() : "";
+    return ext || "bin";
+  }
+
+  // ------------------------------------------------------------
+  // 文件管理器粘贴增强（类似 VS Code 的资源管理器式复制粘贴）
+  // ------------------------------------------------------------
+
+  /** 资源管理器复制/剪切缓存 */
+  private explorerClip: { file: TFile; cut: boolean } | null = null;
+
+  /** 文件管理器中最近点击选中的项（点击后焦点不一定在导航元素上，需要自己记录） */
+  private explorerSelection: { path: string; isFolder: boolean } | null = null;
+
+  /** 记录文件管理器中的点击选中项 */
+  private handleExplorerClick = (e: MouseEvent): void => {
+    const target = e.target as Element | null;
+    const navFile = target?.closest(".nav-file");
+    const navFolder = target?.closest(".nav-folder");
+    if (navFile) {
+      const path = navFile.getAttribute("data-path");
+      if (path !== null) {
+        this.explorerSelection = { path, isFolder: false };
+        return;
+      }
+    }
+    if (navFolder) {
+      const path = this.folderPathFromDom(navFolder);
+      if (path !== null) {
+        this.explorerSelection = { path, isFolder: true };
+        return;
+      }
+    }
+    if (!navFile && !navFolder && target?.closest(".nav-files-container")) {
+      // 点击文件管理器的空白区域：视为选中库根目录
+      this.explorerSelection = { path: "", isFolder: true };
+    }
+  };
+
+  /** 解析当前文件管理器选中项：焦点所在导航项优先，其次最近点击项 */
+  private currentSelection(): { path: string; isFolder: boolean } | null {
+    const active = document.activeElement;
+    if (active?.tagName === "BODY") return this.explorerSelection;
+    if (
+      active?.instanceOf(HTMLElement) &&
+      !active.isContentEditable &&
+      active.tagName !== "INPUT" &&
+      active.tagName !== "TEXTAREA"
+    ) {
+      const navFile = active.closest(".nav-file");
+      if (navFile) {
+        const path = navFile.getAttribute("data-path");
+        if (path !== null) return { path, isFolder: false };
+      }
+      const navFolder = active.closest(".nav-folder");
+      if (navFolder) {
+        const path = this.folderPathFromDom(navFolder);
+        if (path !== null) return { path, isFolder: true };
+      }
+    }
+    return null;
+  }
+
+  /** 从文件夹 DOM 解析路径：优先 data-path 属性，缺失时按标题层级拼接并校验 */
+  private folderPathFromDom(folderEl: Element): string | null {
+    const attr = folderEl.getAttribute("data-path");
+    if (attr !== null) return attr;
+    const parts: string[] = [];
+    let cur: Element | null = folderEl;
+    while (cur && cur.classList.contains("nav-folder")) {
+      const isRoot =
+        cur.classList.contains("mod-root") ||
+        cur.parentElement?.classList.contains("nav-files-container");
+      if (!isRoot) {
+        const name = cur.querySelector(".nav-folder-title-content")?.textContent?.trim();
+        if (name) parts.unshift(name);
+      }
+      cur = cur.parentElement?.closest(".nav-folder") ?? null;
+    }
+    if (parts.length === 0) return null;
+    const path = normalizePath(parts.join("/"));
+    const folder = this.app.vault.getAbstractFileByPath(path);
+    return folder && "children" in folder ? path : null;
+  }
+
+  /** 文件管理器 Ctrl+C / Ctrl+X / Ctrl+V 处理 */
+  private handleExplorerKeys = (e: KeyboardEvent): void => {
+    if (!this.settings.explorerPasteEnabled) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod) return;
+    const selected = this.currentSelection();
+    if (!selected) return;
+
+    const key = e.key.toLowerCase();
+    if (key === "c" || key === "x") {
+      if (selected.isFolder) return;
+      e.preventDefault();
+      const file = this.app.vault.getAbstractFileByPath(selected.path);
+      if (!file || !("extension" in file)) return;
+      this.explorerClip = { file: file as TFile, cut: key === "x" };
+      new Notice(`${key === "x" ? "已剪切" : "已复制"}：${file.name}`, 2000);
+      return;
+    }
+    if (key === "v" && this.explorerClip) {
+      // 库内复制/剪切：直接处理；无内部剪贴板时不拦截，交给 paste 事件导入系统剪贴板文件
+      e.preventDefault();
+      const target = selected.isFolder ? selected.path : this.parentOf(selected.path);
+      void this.pasteExplorerFile(target);
+    }
+  };
+
+  /** 导入系统剪贴板中的文件（从文件管理器外部复制后粘贴） */
+  private handleExplorerPaste = (e: ClipboardEvent): void => {
+    if (!this.settings.explorerPasteEnabled) return;
+    const files = e.clipboardData?.files;
+    if (!files || files.length === 0) return;
+    const selected = this.currentSelection();
+    if (!selected) return;
+    e.preventDefault();
+    const target = selected.isFolder ? selected.path : this.parentOf(selected.path);
+    void this.importExternalFiles(target, Array.from(files));
+  };
+
+  /** 取文件所在目录（根目录返回空串） */
+  private parentOf(path: string): string {
+    const idx = path.lastIndexOf("/");
+    return idx >= 0 ? path.slice(0, idx) : "";
+  }
+
+  /** 生成不重名的目标路径：重名时在扩展名前加序号 */
+  private uniquePath(folder: string, name: string): string {
+    const prefix = folder ? `${folder}/` : "";
+    let dest = normalizePath(`${prefix}${name}`);
+    let i = 1;
+    while (this.app.vault.getAbstractFileByPath(dest)) {
+      const dot = name.lastIndexOf(".");
+      const stem = dot > 0 ? name.slice(0, dot) : name;
+      const ext = dot > 0 ? name.slice(dot) : "";
+      dest = normalizePath(`${prefix}${stem} ${i}${ext}`);
+      i++;
+    }
+    return dest;
+  }
+
+  /** 执行粘贴：复制或移动库内文件到目标目录 */
+  private async pasteExplorerFile(targetPath: string) {
+    const clip = this.explorerClip;
+    if (!clip) return;
+    this.explorerClip = null;
+    try {
+      const src = clip.file;
+      const srcDir = src.path.includes("/") ? src.path.slice(0, src.path.lastIndexOf("/")) : "";
+      if (clip.cut && targetPath === srcDir) return;
+      const dest = this.uniquePath(targetPath, src.name);
+      if (clip.cut) {
+        await this.app.fileManager.renameFile(src, dest);
+        new Notice(`已移动 ${src.name} → ${dest}`, 2500);
+      } else {
+        await this.app.vault.copy(src, dest);
+        new Notice(`已复制 ${src.name} → ${dest}`, 2500);
+      }
+    } catch (err) {
+      console.error("Quick Daily Note: 资源管理器粘贴失败", err);
+      new Notice("粘贴失败，请查看控制台");
+    }
+  }
+
+  /** 将系统剪贴板中的文件导入目标目录 */
+  private async importExternalFiles(targetPath: string, files: File[]) {
+    try {
+      const folder = normalizePath(targetPath.trim());
+      await this.ensureFolder(folder);
+      let count = 0;
+      for (const file of files) {
+        if (file.size === 0) continue;
+        const dest = this.uniquePath(folder, file.name);
+        const buffer = await file.arrayBuffer();
+        await this.app.vault.createBinary(dest, buffer);
+        count++;
+      }
+      if (count > 0) new Notice(`已粘贴 ${count} 个文件到 ${folder || "库根目录"}`, 3000);
+    } catch (err) {
+      console.error("Quick Daily Note: 导入外部文件失败", err);
+      new Notice("粘贴文件失败，请查看控制台");
     }
   }
 
@@ -1289,7 +1617,22 @@ export default class QuickDailyNotePlugin extends Plugin {
         .setIcon("calendar-days")
         .onClick(() => this.openCalendarView())
     );
+    menu.addItem((item) =>
+      item
+        .setTitle("插件设置")
+        .setIcon("settings")
+        .onClick(() => this.openSettings())
+    );
     menu.showAtMouseEvent(evt);
+  }
+
+  /** 打开本插件设置页（app.setting 在旧版 typings 中未声明，运行时存在，做类型兜底） */
+  private openSettings() {
+    const setting = (this.app as unknown as {
+      setting: { open(): void; openTabById(id: string): void };
+    }).setting;
+    setting.open();
+    setting.openTabById(this.manifest.id);
   }
 
   /**
@@ -2536,12 +2879,90 @@ class DeleteImageModal extends Modal {
   }
 }
 
+/** 库内图片/视频文件选择弹窗：搜索并选择背景文件 */
+class ImageFileSuggestModal extends SuggestModal<TFile> {
+  private files: TFile[];
+  private onPick: (path: string) => void;
+
+  constructor(app: App, onPick: (path: string) => void) {
+    super(app);
+    this.onPick = onPick;
+    this.files = app.vault
+      .getFiles()
+      .filter(
+        (f) =>
+          IMAGE_EXTENSIONS.has(f.extension.toLowerCase()) ||
+          VIDEO_EXTENSIONS.has(f.extension.toLowerCase()),
+      );
+    this.setPlaceholder("搜索库内图片/视频文件…");
+    this.limit = 50;
+  }
+
+  getSuggestions(query: string): TFile[] {
+    const q = query.trim().toLowerCase();
+    if (!q) return this.files.slice(0, this.limit);
+    return this.files
+      .filter((f) => f.path.toLowerCase().includes(q))
+      .slice(0, this.limit);
+  }
+
+  renderSuggestion(file: TFile, el: HTMLElement): void {
+    el.createDiv({ text: file.path });
+  }
+
+  onChooseSuggestion(file: TFile): void {
+    this.onPick(file.path);
+  }
+}
+
 class QuickDailyNoteSettingTab extends PluginSettingTab {
   plugin: QuickDailyNotePlugin;
+  /** 背景图片路径输入框引用（选择图片后回填） */
+  private bgPathText: TextComponent | null = null;
 
   constructor(app: App, plugin: QuickDailyNotePlugin) {
     super(app, plugin);
     this.plugin = plugin;
+  }
+
+  /** 背景图片滑杆设置项：实时生效，带重置按钮 */
+  private addBgSlider(
+    containerEl: HTMLElement,
+    name: string,
+    desc: string,
+    min: number,
+    max: number,
+    step: number,
+    get: () => number,
+    set: (v: number) => void,
+    resetValue: number,
+  ): void {
+    let sliderRef: SliderComponent | null = null;
+    new Setting(containerEl)
+      .setName(name)
+      .setDesc(desc)
+      .addExtraButton((btn) =>
+        btn.setIcon("rotate-ccw").setTooltip("重置").onClick(async () => {
+          set(resetValue);
+          await this.plugin.saveSettings();
+          this.plugin.applyBackground();
+          // 原地回弹滑杆，避免整页重渲染导致滚动位置丢失
+          sliderRef?.setValue(resetValue);
+        })
+      )
+      .addSlider((slider) => {
+        sliderRef = slider;
+        slider
+          .setLimits(min, max, step)
+          .setValue(get())
+          .setDynamicTooltip()
+          .setInstant(true)
+          .onChange(async (value) => {
+            set(value);
+            await this.plugin.saveSettings();
+            this.plugin.applyBackground();
+          });
+      });
   }
 
   display() {
@@ -2616,14 +3037,38 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("图片保存目录")
-      .setDesc("vault 内相对路径，留空则保存到库根目录。")
+      .setName("粘贴文件保存到指定目录")
+      .setDesc("粘贴非图片文件（如 PDF、Word、压缩包）时自动保存到下方目录并插入链接。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.autoSavePastedFiles)
+          .onChange(async (value) => {
+            this.plugin.settings.autoSavePastedFiles = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("粘贴文件保存目录")
+      .setDesc("vault 内相对路径，粘贴的图片/文件保存位置，留空则保存到库根目录。")
       .addText((text) =>
         text
           .setPlaceholder("attachments")
           .setValue(this.plugin.settings.pastedImageFolder)
           .onChange(async (value) => {
             this.plugin.settings.pastedImageFolder = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("文件管理器粘贴增强")
+      .setDesc("在左侧文件管理器中：Ctrl/Cmd+C、Ctrl/Cmd+X 复制或剪切库内文件，Ctrl/Cmd+V 粘贴到目标文件夹；也可把系统剪贴板中的文件（如从文件夹复制的）直接粘贴进来（类似 VS Code）。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.explorerPasteEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.explorerPasteEnabled = value;
             await this.plugin.saveSettings();
           })
       );
@@ -2725,8 +3170,9 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("图片路径")
-      .setDesc("vault 内相对路径，支持 png/jpg/webp/gif 等格式，例如：attachments/bg.png。")
-      .addText((text) =>
+      .setDesc("vault 内相对路径。支持图片（png/jpg/webp/gif 等）与视频（mp4/webm 等，作为动态壁纸播放），也可点击右侧按钮从库内选择。")
+      .addText((text) => {
+        this.bgPathText = text;
         text
           .setPlaceholder("attachments/bg.png")
           .setValue(this.plugin.settings.bgImagePath)
@@ -2734,21 +3180,78 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
             this.plugin.settings.bgImagePath = value.trim();
             await this.plugin.saveSettings();
             this.plugin.applyBackground();
-          })
+          });
+      })
+      .addButton((btn) =>
+        btn.setButtonText("选择图片").setCta().onClick(() => {
+          new ImageFileSuggestModal(this.app, (path) => {
+            this.plugin.settings.bgImagePath = path;
+            void this.plugin.saveSettings();
+            this.plugin.applyBackground();
+            this.bgPathText?.setValue(path);
+          }).open();
+        })
       );
 
+    this.addBgSlider(
+      containerEl, "图片不透明度", "数值越低背景越淡，文字越清晰。",
+      10, 100, 5,
+      () => Math.round(this.plugin.settings.bgOpacity * 100),
+      (v) => { this.plugin.settings.bgOpacity = v / 100; },
+      60,
+    );
+    this.addBgSlider(
+      containerEl, "模糊半径", "对背景图片应用高斯模糊（像素）。",
+      0, 30, 1,
+      () => this.plugin.settings.bgBlur,
+      (v) => { this.plugin.settings.bgBlur = v; },
+      0,
+    );
+    this.addBgSlider(
+      containerEl, "亮度", "背景图片亮度，100% 为原图。",
+      20, 200, 5,
+      () => this.plugin.settings.bgBrightness,
+      (v) => { this.plugin.settings.bgBrightness = v; },
+      100,
+    );
+    this.addBgSlider(
+      containerEl, "对比度", "背景图片对比度，100% 为原图。",
+      20, 200, 5,
+      () => this.plugin.settings.bgContrast,
+      (v) => { this.plugin.settings.bgContrast = v; },
+      100,
+    );
+    this.addBgSlider(
+      containerEl, "水平位置", "背景图片的水平对齐位置。",
+      0, 100, 1,
+      () => this.plugin.settings.bgPosX,
+      (v) => { this.plugin.settings.bgPosX = v; },
+      50,
+    );
+    this.addBgSlider(
+      containerEl, "垂直位置", "背景图片的垂直对齐位置。",
+      0, 100, 1,
+      () => this.plugin.settings.bgPosY,
+      (v) => { this.plugin.settings.bgPosY = v; },
+      50,
+    );
+    this.addBgSlider(
+      containerEl, "缩放", "放大或缩小背景图片（100% 为原始大小）。",
+      50, 250, 5,
+      () => this.plugin.settings.bgScale,
+      (v) => { this.plugin.settings.bgScale = v; },
+      100,
+    );
+
     new Setting(containerEl)
-      .setName("图片不透明度")
-      .setDesc("数值越低背景越淡，文字越清晰。")
+      .setName("适配方式")
+      .setDesc("铺满：图片裁剪后填满整个窗口；完整显示：整张图片可见，窗口四周可能留白。")
       .addDropdown((dd) => {
-        dd.addOption("0.3", "30%");
-        dd.addOption("0.5", "50%");
-        dd.addOption("0.6", "60%");
-        dd.addOption("0.8", "80%");
-        dd.addOption("1", "100%");
-        dd.setValue(String(this.plugin.settings.bgOpacity));
+        dd.addOption("cover", "铺满（裁剪）");
+        dd.addOption("contain", "完整显示");
+        dd.setValue(this.plugin.settings.bgFit);
         dd.onChange(async (v) => {
-          this.plugin.settings.bgOpacity = parseFloat(v);
+          this.plugin.settings.bgFit = v as "cover" | "contain";
           await this.plugin.saveSettings();
           this.plugin.applyBackground();
         });

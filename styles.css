@@ -437,11 +437,11 @@
 }
 
 /* 图片放大弹窗：宽度贴合图片，压缩内部留白 */
-.qdn-img-zoom-modal {
-  min-width: 0 !important;
-  max-width: 96vw !important;
-  padding: 0 !important;
-  max-height: none !important;
+.modal.qdn-img-zoom-modal {
+  min-width: 0;
+  max-width: 96vw;
+  padding: 0;
+  max-height: none;
   border-radius: 6px;
 }
 
@@ -450,7 +450,7 @@
 }
 
 .qdn-img-zoom-modal .modal-content {
-  padding: 4px !important;
+  padding: 4px;
 }
 
 .qdn-img-zoom-body {
@@ -513,11 +513,11 @@
 }
 
 /* 图片裁剪弹窗：宽度贴合图片，压缩内部留白 */
-.qdn-crop-modal {
-  min-width: 0 !important;
-  max-width: 96vw !important;
-  padding: 0 !important;
-  max-height: none !important;
+.modal.qdn-crop-modal {
+  min-width: 0;
+  max-width: 96vw;
+  padding: 0;
+  max-height: none;
   border-radius: 6px;
 }
 
@@ -526,7 +526,7 @@
 }
 
 .qdn-crop-modal .modal-content {
-  padding: 4px !important;
+  padding: 4px;
 }
 
 .qdn-crop-modal h3 {
@@ -623,9 +623,9 @@
   margin: 6px 0 2px;
 }
 
-.qdn-danger-btn {
-  background: var(--text-error) !important;
-  border-color: var(--text-error) !important;
+button.qdn-danger-btn {
+  background: var(--text-error);
+  border-color: var(--text-error);
 }
 
 /* 待办顺延提示 */
@@ -838,21 +838,20 @@
    ============================================================ */
 
 @media print {
-  .mermaid-enhancer-container {
-    overflow: visible !important;
-    max-height: none !important;
+  .mermaid-enhancer-container.me-printing {
+    max-height: none;
   }
 
   /* 覆盖 Obsidian 内置 mermaid 渲染结果（含 PDF 隐藏窗口中的图） */
-  .mermaid svg {
-    width: 100% !important;
-    height: auto !important;
-    max-width: 100% !important;
-    max-height: 70vh !important;
-    margin: 0 auto !important;
+  div.mermaid svg {
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+    max-height: 70vh;
+    margin: 0 auto;
   }
 
   .mermaid-enhancer-toolbar {
-    display: none !important;
+    display: none;
   }
 }

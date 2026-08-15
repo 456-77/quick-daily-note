@@ -2,6 +2,28 @@
 
 一个将「快捷日记 + 日历待办 + 定时提醒」整合在一起的 Obsidian 插件，同时提供粘贴代码语言自动识别、粘贴图片自动保存、图片渲染增强与 Mermaid 图表增强，让日常记录更顺手。
 
+## English Overview
+
+**Quick Daily Note** is a daily-journal and todo companion for Obsidian:
+
+- **Daily notes** — create a dated note with one click (custom folder & date format); optional automatic weather recording (Open-Meteo, no API key)
+- **Calendar & todos** — a sidebar calendar panel manages todos per day: add, check off, edit, delete, and carry unfinished tasks to today
+- **Reminders** — scheduled prompts to add todos and review unfinished ones; click the notice to open the panel
+- **Weekly review** — insert a summary of the week's diaries and todos at the cursor
+- **Paste enhancements** — auto-detect the language of pasted code (30+ languages, zero dependencies); optionally save pasted images into a configurable folder
+- **Image enhancements** — auto-fitting images with a hover toolbar (crop / zoom / copy / rename / delete) and click-to-zoom
+- **Mermaid enhancements** — fit-to-width diagrams, zoom, SVG/PNG export, print/PDF-safe rendering
+
+**Requirements**: Obsidian v1.7.2+. **Platforms**: desktop & mobile.
+
+**Install**: Community plugins → Browse → search "Quick Daily Note", or install via [BRAT](https://obsidian.md/plugins?id=obsidian42-brat) using `456-77/quick-daily-note`.
+
+**Privacy**: all data stays in your vault's `data.json`; the only optional network call is weather data from [open-meteo.com](https://open-meteo.com) (disabled by default).
+
+中文文档如下。
+
+---
+
 ## ✨ 功能特性
 
 ### 📝 快捷日记

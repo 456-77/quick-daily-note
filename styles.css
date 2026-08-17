@@ -184,6 +184,9 @@
 }
 
 .qdn-todo-list {
+    max-height: 40vh;
+    overflow-y: auto;
+    padding-right: 4px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -201,6 +204,14 @@
 .qdn-todo-item:hover {
   background: var(--background-modifier-hover);
 }
+
+  .qdn-todo-item.qdn-todo-editing {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--background-primary);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  }
 
 .qdn-todo-item.qdn-todo-completed {
   background: var(--background-modifier-hover);
@@ -696,18 +707,21 @@ button.qdn-danger-btn {
    自适应显示 / 缩放工具栏 / 打印（PDF 导出）样式
    ============================================================ */
 
-/* 容器：相对定位（工具栏锚点），放大超出时出现滚动条 */
+/* 容器：flex 纵向布局，工具栏作为独立行显示在图表上方 */
 .mermaid-enhancer-container {
   position: relative;
   width: 100%;
-  overflow: auto;
   margin: 0.5em 0;
-  scrollbar-width: thin;
+  display: flex;
+  flex-direction: column;
 }
 
-/* 内置 mermaid 渲染结果（div.mermaid > svg）保持在其内部 */
+/* 内置 mermaid 渲染结果（div.mermaid > svg）保持在其内部，独立滚动 */
 .mermaid-enhancer-scroll {
   width: 100%;
+  min-width: 0;
+  overflow: auto;
+  scrollbar-width: thin;
 }
 
 .mermaid-enhancer-scroll svg {
@@ -736,13 +750,17 @@ button.qdn-danger-btn {
   overflow: visible;
 }
 
-/* ---------------- 悬浮工具栏 ---------------- */
+.mermaid-enhancer-container.me-printing .mermaid-enhancer-scroll {
+  overflow: visible;
+}
+
+/* ---------------- 悬浮工具栏（图表框外右上角） ---------------- */
 
 .mermaid-enhancer-toolbar {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 10;
+  order: -1;
+  align-self: flex-end;
+  position: relative;
+  margin-bottom: 4px;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -868,7 +886,10 @@ body.qdn-bg-image {
 body.qdn-bg-image::before {
   content: "";
   position: fixed;
-  inset: 0;
+  top: var(--qdn-bg-top, 0px);
+  left: 0;
+  width: 100%;
+  height: calc(100vh - var(--qdn-bg-top, 0px));
   z-index: -1;
   background-image: var(--qdn-bg-url);
   background-size: var(--qdn-bg-fit, cover);
@@ -880,7 +901,7 @@ body.qdn-bg-image::before {
   pointer-events: none;
 }
 
-/* 各层背景透明化，露出背景图片 */
+/* 各层背景透明化，露出背景图片（标题栏除外：背景从标题栏下方开始，不干扰窗口拖动） */
 body.qdn-bg-image .app-container,
 body.qdn-bg-image .workspace,
 body.qdn-bg-image .workspace-split,
@@ -892,22 +913,68 @@ body.qdn-bg-image .view-content,
 body.qdn-bg-image .markdown-source-view,
 body.qdn-bg-image .markdown-preview-view,
 body.qdn-bg-image .workspace-ribbon,
-body.qdn-bg-image .status-bar,
-body.qdn-bg-image .titlebar {
+body.qdn-bg-image .status-bar {
   background-color: transparent;
 }
 
 /* 动态壁纸（视频）承载层，调节变量与图片背景共用 */
 #qdn-bg-video {
   position: fixed;
-  inset: 0;
-  z-index: -1;
+  top: var(--qdn-bg-top, 0px);
+  left: 0;
   width: 100%;
-  height: 100%;
+  height: calc(100vh - var(--qdn-bg-top, 0px));
+  z-index: -1;
   object-fit: var(--qdn-bg-fit, cover);
   object-position: var(--qdn-bg-pos-x, 50%) var(--qdn-bg-pos-y, 50%);
   opacity: var(--qdn-bg-opacity, 0.25);
   filter: blur(var(--qdn-bg-blur, 0px)) brightness(var(--qdn-bg-brightness, 100%)) contrast(var(--qdn-bg-contrast, 100%));
   transform: scale(var(--qdn-bg-scale, 1));
   pointer-events: none;
+}
+
+/* Mermaid 放大弹窗：原始尺寸展示，超出部分滚动查看 */
+.qdn-mermaid-zoom-content {
+  overflow: auto;
+  max-height: 85vh;
+}
+
+.qdn-mermaid-zoom-content svg {
+  display: block;
+  margin: 0 auto;
+  max-width: none;
+}
+
+/* 代码块删除按钮（浮动层：阅读视图与实时预览统一，悬停代码块时出现在右上角） */
+#qdn-code-delete-btn {
+  position: fixed;
+  z-index: 1000;
+  display: none;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  color: var(--text-normal);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#qdn-code-delete-btn.qdn-show {
+  display: inline-flex;
+}
+
+#qdn-code-delete-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+/* 通用弹窗按钮行 */
+.qdn-modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }

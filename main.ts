@@ -12,6 +12,7 @@ import {
   PluginSettingTab,
   requestUrl,
   Setting,
+    SettingDefinitionItem,
   SliderComponent,
   SuggestModal,
   TAbstractFile,
@@ -204,6 +205,14 @@ interface ZoomState {
   fitted: boolean;
 }
 
+/** 同页光标历史快照 */
+interface CursorSnapshot {
+  line: number;
+  ch: number;
+  scrollTop: number;
+  scrollLeft: number;
+}
+
 const I18N = {
   zh: {
     zoomIn: "放大",
@@ -276,6 +285,13 @@ export default class QuickDailyNotePlugin extends Plugin {
   private zoomStates = new Map<HTMLElement, ZoomState>();
   private mermaidObserver: MutationObserver | null = null;
   private printStyles: Map<HTMLElement, { css: string; overflow: string }> | null = null;
+  /** 代码块删除按钮（浮动层，阅读视图与实时预览统一方案） */
+  private codeDeleteBtn: HTMLElement | null = null;
+  private activeDeleteTarget: HTMLElement | null = null;
+  /** 同页光标历史：文件路径 -> 快照栈 */
+    private cursorHistory = new Map<string, CursorSnapshot[]>();
+    /** 各文件最近一次记录的光标，用于识别大幅跳转 */
+    private lastCursors = new Map<string, EditorPosition>();
 
   async onload() {
     await this.loadSettings();
@@ -306,6 +322,14 @@ export default class QuickDailyNotePlugin extends Plugin {
       callback: () => this.generateWeeklyReview(),
     });
 
+      this.addCommand({
+        id: "back-to-previous-cursor",
+        name: "返回上一次光标位置（同页）",
+        editorCallback: (editor, view) => {
+          if (view.file) this.restorePreviousCursor(view.file, editor);
+        },
+      });
+
     this.registerView(VIEW_TYPE, (leaf) => new CalendarView(leaf, this));
 
     // 粘贴代码时自动识别语言并生成代码块
@@ -318,6 +342,7 @@ export default class QuickDailyNotePlugin extends Plugin {
 
     // 图片与 mermaid 渲染增强：监听 DOM 变化，包装渲染结果
     this.startMermaidObserver();
+    document.addEventListener("mouseover", this.handleCodeBlockHover);
     this.registerEvent(this.app.workspace.on("layout-change", () => this.processRendered()));
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.processRendered()));
     this.registerEvent(
@@ -330,6 +355,10 @@ export default class QuickDailyNotePlugin extends Plugin {
     document.addEventListener("keydown", this.handleExplorerKeys);
     document.addEventListener("click", this.handleExplorerClick);
     document.addEventListener("paste", this.handleExplorerPaste);
+    document.addEventListener("mousedown", this.handleCursorMousedown, true);
+    document.addEventListener("mouseup", this.handleCursorMouseup);
+    window.addEventListener("keydown", this.handleCursorBackKeys, true);
+    document.addEventListener("keyup", this.handleCursorKeyup);
 
     window.addEventListener("beforeprint", this.onBeforePrint);
     window.addEventListener("afterprint", this.onAfterPrint);
@@ -342,12 +371,22 @@ export default class QuickDailyNotePlugin extends Plugin {
   onunload() {
     this.imageObserver?.disconnect();
     this.imageObserver = null;
+    document.removeEventListener("mouseover", this.handleCodeBlockHover);
+    document.removeEventListener("mousedown", this.hideOnOutsideClick, true);
+    window.removeEventListener("scroll", this.hideCodeDeleteBtnNow, true);
+    this.codeDeleteBtn?.remove();
+    this.codeDeleteBtn = null;
+    this.activeDeleteTarget = null;
     this.mermaidObserver?.disconnect();
     this.mermaidObserver = null;
     document.removeEventListener("click", this.zoomClickHandler, true);
     document.removeEventListener("keydown", this.handleExplorerKeys);
     document.removeEventListener("click", this.handleExplorerClick);
     document.removeEventListener("paste", this.handleExplorerPaste);
+    document.removeEventListener("mousedown", this.handleCursorMousedown, true);
+    document.removeEventListener("mouseup", this.handleCursorMouseup);
+    window.removeEventListener("keydown", this.handleCursorBackKeys, true);
+    document.removeEventListener("keyup", this.handleCursorKeyup);
     window.removeEventListener("beforeprint", this.onBeforePrint);
     window.removeEventListener("afterprint", this.onAfterPrint);
     document.body.toggleClass("qdn-bg-image", false);
@@ -415,12 +454,259 @@ export default class QuickDailyNotePlugin extends Plugin {
     }
   }
 
+  // ------------------------------------------------------------
+  // 代码块删除按钮
+  // ------------------------------------------------------------
+
+  /** 鼠标悬停代码块时显示删除按钮（阅读视图与实时预览统一） */
+  private handleCodeBlockHover = (e: MouseEvent): void => {
+    const target = e.target as HTMLElement | null;
+    // 实时预览：原生按钮是 span.code-block-flair（语言标签+复制）
+    const flair = target?.closest?.(".code-block-flair");
+    if (flair) {
+      this.showCodeDeleteBtn(flair as HTMLElement, flair as HTMLElement, "button");
+      return;
+    }
+    // 阅读视图：原生复制按钮 .copy-code-button（其左侧可能还有 ::before 语言标签）
+    const copyBtn = target?.closest?.<HTMLElement>(".copy-code-button");
+    if (copyBtn) {
+      const pre = copyBtn.closest("pre");
+      if (pre) {
+        if (this.anchorToNativeLabel(pre)) return;
+        this.showCodeDeleteBtn(copyBtn, pre, "button");
+        return;
+      }
+    }
+    // 兜底：直接悬停代码块 pre（无原生按钮时也显示）
+    const pre = target?.closest?.(".markdown-preview-view pre");
+    if (pre && !pre.closest(".mermaid-enhancer-scroll, .mermaid-enhancer-container")) {
+      if (this.anchorToNativeLabel(pre as HTMLElement)) return;
+      // 代码块内有原生按钮元素时锚定其左侧
+      const innerBtn = pre.querySelector<HTMLElement>(".copy-code-button, .code-block-flair");
+      if (innerBtn) {
+        this.showCodeDeleteBtn(innerBtn, pre as HTMLElement, "button");
+        return;
+      }
+      this.showCodeDeleteBtn(pre as HTMLElement, pre as HTMLElement, "block");
+    }
+  };
+
+  /**
+   * 若代码块 pre 存在 ::before 语言标签（阅读视图最靠左的原生元素），
+   * 把删除按钮锚定到其左侧并返回 true；否则返回 false。
+   */
+  private anchorToNativeLabel(pre: HTMLElement): boolean {
+    const labelRect = this.nativeLabelRect(pre);
+    if (!labelRect) return false;
+    this.showCodeDeleteBtnAt(
+      labelRect.left - 32,
+      labelRect.top + (labelRect.height - 26) / 2,
+      pre,
+    );
+    return true;
+  }
+
+  /** 读取 pre::before 语言标签的视觉位置（伪元素无法用 JS 查询，需读计算样式） */
+  private nativeLabelRect(pre: HTMLElement): { left: number; top: number; height: number } | null {
+    const cs = getComputedStyle(pre, "::before");
+    if (cs.content === "none" || cs.content === "") return null;
+    const width = parseFloat(cs.width) || 0;
+    const height = parseFloat(cs.height) || 0;
+    if (width <= 0 || height <= 0) return null;
+    const preRect = pre.getBoundingClientRect();
+    return {
+      left: preRect.right - (parseFloat(cs.right) || 0) - width,
+      top: preRect.top + (parseFloat(cs.top) || 0),
+      height,
+    };
+  }
+
+  /** 在指定视口坐标显示删除按钮 */
+  private showCodeDeleteBtnAt(left: number, top: number, deleteTarget: HTMLElement): void {
+    this.ensureCodeDeleteBtn();
+    if (!this.codeDeleteBtn) return;
+    this.codeDeleteBtn.style.left = `${Math.max(left, 4)}px`;
+    this.codeDeleteBtn.style.top = `${Math.max(top, 40)}px`;
+    this.codeDeleteBtn.addClass("qdn-show");
+    this.activeDeleteTarget = deleteTarget;
+  }
+
+  /**
+   * 显示删除按钮。
+   * anchorKind "button"：锚点是原生按钮/flair，按钮放在其左侧垂直居中，不与原生按钮重叠；
+   * anchorKind "block"：锚点是代码块 pre，按钮固定在代码块右上角。
+   */
+  private showCodeDeleteBtn(
+    anchor: HTMLElement,
+    deleteTarget: HTMLElement,
+    anchorKind: "button" | "block",
+  ): void {
+    const rect = anchor.getBoundingClientRect();
+    if (anchorKind === "button") {
+      // 锚点左侧 6px 间距、垂直居中
+      this.showCodeDeleteBtnAt(rect.left - 32, rect.top + (rect.height - 26) / 2, deleteTarget);
+    } else {
+      // 代码块右上角
+      this.showCodeDeleteBtnAt(rect.right - 32, rect.top + 6, deleteTarget);
+    }
+  }
+
+  /** 立即隐藏删除按钮 */
+  private hideCodeDeleteBtnNow = (): void => {
+    this.codeDeleteBtn?.removeClass("qdn-show");
+    this.activeDeleteTarget = null;
+  };
+
+  /** 点击非按钮区域时立即隐藏删除按钮 */
+  private hideOnOutsideClick = (e: MouseEvent): void => {
+    const target = e.target as Node | null;
+    if (!this.codeDeleteBtn?.contains(target)) this.hideCodeDeleteBtnNow();
+  };
+
+  /** 创建全局唯一的浮动删除按钮（挂 body，不进入编辑器 DOM） */
+  private ensureCodeDeleteBtn(): void {
+    if (this.codeDeleteBtn) return;
+    const btn = createEl("button");
+    btn.id = "qdn-code-delete-btn";
+    btn.setText("🗑");
+    btn.setAttr("type", "button");
+    btn.setAttr("title", "删除代码块");
+    btn.setAttr("aria-label", "删除代码块");
+    btn.addEventListener("click", () => {
+      const target = this.activeDeleteTarget;
+      if (!target) return;
+      const onConfirm = target.classList.contains("code-block-flair")
+        ? () => void this.deleteBlockByFlair(target)
+        : () => void this.deleteCodeBlock(target);
+      this.openCodeBlockDeleteModal(onConfirm);
+    });
+    // 点击按钮以外的任意位置或滚动页面时隐藏
+    document.addEventListener("mousedown", this.hideOnOutsideClick, true);
+    window.addEventListener("scroll", this.hideCodeDeleteBtnNow, true);
+    document.body.appendChild(btn);
+    this.codeDeleteBtn = btn;
+  }
+
+  /** 实时预览：按 flair 定位代码块并删除 */
+  private async deleteBlockByFlair(flair: HTMLElement) {
+    const view = this.findMarkdownView(flair);
+    const file = view?.file;
+    if (!file) return;
+    // 优先取所在行的 data-line（代码块首行即围栏行）
+    const lineEl = flair.closest(".cm-line[data-line]");
+    const attrLine = lineEl ? parseInt(lineEl.getAttribute("data-line") ?? "", 10) : -1;
+    if (!Number.isNaN(attrLine) && attrLine >= 0) {
+      await this.deleteCodeBlockAtLine(file, attrLine);
+      return;
+    }
+    // 兜底：若仍存在 pre（部分版本），走内容匹配
+    const pre = flair.closest("pre");
+    if (pre) {
+      await this.deleteCodeBlock(pre);
+      return;
+    }
+    new Notice("无法定位代码块，未删除");
+  }
+
+  /** 删除代码块确认弹窗 */
+  openCodeBlockDeleteModal(onConfirm: () => void) {
+    new CodeBlockDeleteModal(this.app, onConfirm).open();
+  }
+
+  /** 删除代码块（阅读视图：由 pre 的 data-line 或内容匹配定位） */
+  private async deleteCodeBlock(pre: HTMLElement) {
+    const view = this.findMarkdownView(pre);
+    const file = view?.file;
+    if (!file) return;
+    const content = await this.app.vault.read(file);
+    const lines = content.split("\n");
+    const lineAttr = pre.getAttribute("data-line");
+    const attrLine = lineAttr !== null ? parseInt(lineAttr, 10) : -1;
+    let startLine =
+      !Number.isNaN(attrLine) && /^\s*(```|~~~)/.test(lines[attrLine] ?? "") ? attrLine : -1;
+    if (startLine < 0) {
+      startLine = this.findCodeBlockByContent(lines, pre.textContent ?? "");
+      if (startLine < 0) {
+        new Notice("无法定位代码块，未删除");
+        return;
+      }
+    }
+    await this.deleteCodeBlockAtLine(file, startLine);
+  }
+
+  /** 按起始行删除代码块（从起始围栏到结束围栏） */
+  async deleteCodeBlockAtLine(file: TFile, startLine: number) {
+    try {
+      const content = await this.app.vault.read(file);
+      const lines = content.split("\n");
+      if (!/^\s*(```|~~~)/.test(lines[startLine] ?? "")) {
+        new Notice("无法定位代码块起点，未删除");
+        return;
+      }
+      let endLine = startLine;
+      for (let i = startLine + 1; i < lines.length; i++) {
+        if (/^\s*(```|~~~)/.test(lines[i])) {
+          endLine = i;
+          break;
+        }
+      }
+      const removed = lines.slice(startLine, endLine + 1);
+      const newLines = [...lines.slice(0, startLine), ...lines.slice(endLine + 1)];
+      await this.app.vault.modify(file, newLines.join("\n"));
+      new Notice(`已删除代码块（${removed.length} 行）`, 2000);
+    } catch (err) {
+      console.error("Quick Daily Note: 删除代码块失败", err);
+      new Notice("删除代码块失败，请查看控制台");
+    }
+  }
+
+  /** 按代码块内容匹配源码中的围栏块起始行（存在多个相同块时返回 -1） */
+  private findCodeBlockByContent(lines: string[], preText: string): number {
+    const target = preText.trim();
+    if (!target) return -1;
+    let found = -1;
+    let i = 0;
+    while (i < lines.length) {
+      if (/^\s*(```|~~~)/.test(lines[i])) {
+        const start = i;
+        let j = i + 1;
+        while (j < lines.length && !/^\s*(```|~~~)/.test(lines[j])) j++;
+        const blockContent = lines.slice(start + 1, j).join("\n").trim();
+        if (blockContent === target) {
+          if (found !== -1) return -1;
+          found = start;
+        }
+        i = j + 1;
+      } else {
+        i++;
+      }
+    }
+    return found;
+  }
+
+  /** 定位包含指定元素的 Markdown 视图 */
+  findMarkdownView(el: HTMLElement): MarkdownView | null {
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view as ItemView;
+      if (view.getViewType() === "markdown" && view.contentEl.contains(el)) {
+        return view as MarkdownView;
+      }
+    }
+    return null;
+  }
+
   /** 应用全局背景图片设置（注入 CSS 变量并切换 body 类） */
   applyBackground(): void {
     const s = this.settings;
     const path = s.bgImagePath.trim();
     const enabled = s.bgEnabled && path.length > 0;
     document.body.toggleClass("qdn-bg-image", enabled);
+    // 背景层从标题栏下方开始，避免覆盖标题栏导致窗口无法拖动
+    const titlebar = document.querySelector<HTMLElement>(".titlebar");
+    document.body.style.setProperty(
+      "--qdn-bg-top",
+      `${titlebar ? titlebar.offsetHeight : 0}px`,
+    );
     if (!enabled) {
       document.body.style.removeProperty("--qdn-bg-url");
       document.body.style.removeProperty("--qdn-bg-opacity");
@@ -435,7 +721,7 @@ export default class QuickDailyNotePlugin extends Plugin {
       return;
     }
     const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
-    if (!file || !("extension" in file)) {
+    if (!file || !(file instanceof TFile)) {
       // 仅提示，不修改设置：加载早期可能暂时解析不到文件，误关会把配置持久化
       console.warn("Quick Daily Note: 背景文件不存在", path);
       new Notice("背景文件不存在，请检查设置中的图片路径");
@@ -444,7 +730,7 @@ export default class QuickDailyNotePlugin extends Plugin {
       return;
     }
     const url = this.app.vault.adapter.getResourcePath(normalizePath(path));
-    const bgFile = file as TFile;
+    const bgFile = file;
     if (VIDEO_EXTENSIONS.has(bgFile.extension.toLowerCase())) {
       // 动态壁纸：视频元素承载，其余调节变量照常注入
       document.body.style.removeProperty("--qdn-bg-url");
@@ -573,13 +859,27 @@ export default class QuickDailyNotePlugin extends Plugin {
    * 并统一从这一处打开放大弹窗。
    */
   private zoomClickHandler = (e: MouseEvent): void => {
+    const target = e.target as HTMLElement | null;
+    // Mermaid 图表点击放大展示
+    const mermaidSvg = target?.closest?.(".mermaid-enhancer-scroll svg");
+    if (mermaidSvg) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.openMermaidZoomModal(mermaidSvg as SVGSVGElement);
+      return;
+    }
     if (!this.settings.imageEnhancerEnabled) return;
-    const img = (e.target as HTMLElement | null)?.closest?.(".qdn-img-enhancer img");
-    if (!(img instanceof HTMLImageElement)) return;
+    const img = target?.closest?.(".qdn-img-enhancer img");
+    if (!img?.instanceOf(HTMLImageElement)) return;
     e.preventDefault();
     e.stopPropagation();
     this.openZoomModal(img);
   };
+
+  /** 打开 Mermaid 图表放大弹窗 */
+  private openMermaidZoomModal(svg: SVGSVGElement) {
+    new MermaidZoomModal(this.app, svg).open();
+  }
 
   /** 路径规范化：统一分隔符并忽略大小写（Windows） */
   private normPath(s: string): string {
@@ -1385,6 +1685,119 @@ export default class QuickDailyNotePlugin extends Plugin {
     return ext || "bin";
   }
 
+    // ------------------------------------------------------------
+    // 同页光标历史（返回快捷键）
+    // ------------------------------------------------------------
+
+    /** 记录一次光标快照；若与栈顶相同则忽略，避免重复入栈 */
+    private pushCursorSnapshot(path: string, editor: Editor, pos: EditorPosition): void {
+      const scroll = editor.getScrollInfo();
+      const snap: CursorSnapshot = {
+        line: pos.line,
+        ch: pos.ch,
+        scrollTop: scroll.top,
+        scrollLeft: scroll.left,
+      };
+      const arr = this.cursorHistory.get(path) ?? [];
+      const last = arr[arr.length - 1];
+      if (
+        last &&
+        last.line === snap.line &&
+        last.ch === snap.ch &&
+        Math.abs(last.scrollTop - snap.scrollTop) < 10
+      ) {
+        return;
+      }
+      arr.push(snap);
+      if (arr.length > 200) arr.shift();
+      this.cursorHistory.set(path, arr);
+    }
+
+    /** 鼠标按下时记录按下前的光标（点击跳转前的位置） */
+    private handleCursorMousedown = (e: MouseEvent): void => {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest(".cm-content, .markdown-source-view")) return;
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!view?.file || !view.editor) return;
+      this.pushCursorSnapshot(view.file.path, view.editor, view.editor.getCursor());
+    };
+
+    /** 鼠标抬起后更新“最近光标”，供键盘大幅跳转判断使用 */
+    private handleCursorMouseup = (e: MouseEvent): void => {
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest(".cm-content, .markdown-source-view")) return;
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!view?.file || !view.editor) return;
+      this.lastCursors.set(view.file.path, view.editor.getCursor());
+    };
+
+    /** 键盘大幅跳转后记录跳转前的位置（PageUp/PageDown/Home/End/Ctrl+Home 等） */
+    private handleCursorKeyup = (e: KeyboardEvent): void => {
+      if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"].includes(e.key)) {
+        return;
+      }
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!view?.file || !view.editor) return;
+      const file = view.file;
+      const editor = view.editor;
+      const cur = editor.getCursor();
+      const prev = this.lastCursors.get(file.path);
+      if (prev) {
+        const lineJump = Math.abs(cur.line - prev.line);
+        const chJump = Math.abs(cur.ch - prev.ch);
+        if (lineJump >= 5 || chJump >= 50) {
+          this.pushCursorSnapshot(file.path, editor, prev);
+        }
+      }
+      this.lastCursors.set(file.path, cur);
+    };
+
+    /** 返回快捷键：优先恢复同页上一次光标位置；没有历史时交给 Obsidian 默认返回行为 */
+    private handleCursorBackKeys = (e: KeyboardEvent): void => {
+      if (e.repeat) return;
+      const isBackShortcut =
+        e.key === "ArrowLeft" &&
+        !e.shiftKey &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        e.altKey;
+      // macOS 上 Obsidian 的“返回”常为 Cmd+Alt+←，这里一并兼容
+      const isMacBackShortcut =
+        e.key === "ArrowLeft" &&
+        !e.shiftKey &&
+        !e.ctrlKey &&
+        e.metaKey &&
+        e.altKey;
+      if (!isBackShortcut && !isMacBackShortcut) return;
+
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!view?.file || !view.editor) return;
+      if (!view.editor.hasFocus()) return;
+      if (this.restorePreviousCursor(view.file, view.editor)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    /** 恢复当前文件的上一个光标位置；返回是否成功恢复 */
+    private restorePreviousCursor(file: TFile, editor: Editor): boolean {
+      const arr = this.cursorHistory.get(file.path);
+      if (!arr || arr.length === 0) return false;
+      const snap = arr.pop();
+      if (!snap) return false;
+      if (arr.length === 0) this.cursorHistory.delete(file.path);
+      else this.cursorHistory.set(file.path, arr);
+
+      editor.setCursor({ line: snap.line, ch: snap.ch });
+      editor.scrollTo(snap.scrollLeft, snap.scrollTop);
+      editor.focus();
+      this.lastCursors.set(file.path, { line: snap.line, ch: snap.ch });
+      new Notice("已返回上一次光标位置", 1200);
+      return true;
+    }
+
+
   // ------------------------------------------------------------
   // 文件管理器粘贴增强（类似 VS Code 的资源管理器式复制粘贴）
   // ------------------------------------------------------------
@@ -1479,8 +1892,8 @@ export default class QuickDailyNotePlugin extends Plugin {
       if (selected.isFolder) return;
       e.preventDefault();
       const file = this.app.vault.getAbstractFileByPath(selected.path);
-      if (!file || !("extension" in file)) return;
-      this.explorerClip = { file: file as TFile, cut: key === "x" };
+      if (!file || !(file instanceof TFile)) return;
+      this.explorerClip = { file, cut: key === "x" };
       new Notice(`${key === "x" ? "已剪切" : "已复制"}：${file.name}`, 2000);
       return;
     }
@@ -2217,6 +2630,16 @@ class CalendarView extends ItemView {
     }
   }
 
+  /** 复制待办文字到剪贴板 */
+  private async copyTodoText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      new Notice("已复制待办", 1500);
+    } catch {
+      new Notice("复制失败", 1500);
+    }
+  }
+
   private renderTodos(root: HTMLElement) {
     const wrapper = root.createDiv("qdn-todos");
 
@@ -2265,6 +2688,7 @@ class CalendarView extends ItemView {
         });
 
         if (this.editingIndex === index) {
+            row.addClass("qdn-todo-editing");
           // 编辑状态：渲染输入框，回车保存、Esc 取消、失焦保存
           const input = row.createEl("input", {
             type: "text",
@@ -2307,6 +2731,15 @@ class CalendarView extends ItemView {
           editBtn.addEventListener("click", () => {
             this.editingIndex = index;
             this.render();
+          });
+
+          const copyBtn = row.createEl("button", {
+            text: "⧉",
+            cls: "qdn-todo-edit-btn",
+          });
+          copyBtn.setAttr("aria-label", "复制");
+          copyBtn.addEventListener("click", () => {
+            void this.copyTodoText(item.text);
           });
         }
 
@@ -2880,6 +3313,65 @@ class DeleteImageModal extends Modal {
   }
 }
 
+/** 代码块删除确认弹窗 */
+class CodeBlockDeleteModal extends Modal {
+  private onConfirm: () => void;
+
+  constructor(app: App, onConfirm: () => void) {
+    super(app);
+    this.onConfirm = onConfirm;
+    this.setTitle("删除代码块");
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createDiv().setText("确定删除该代码块吗？此操作会从笔记中移除对应内容。");
+    const btns = contentEl.createDiv({ cls: "qdn-modal-buttons" });
+    btns
+      .createEl("button", { text: "取消", cls: "mod-cta" })
+      .addEventListener("click", () => this.close());
+    btns.createEl("button", { text: "删除", cls: "mod-warning" }).addEventListener("click", () => {
+      this.close();
+      this.onConfirm();
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/** Mermaid 图表放大弹窗：以原始尺寸克隆展示，超出部分可滚动查看 */
+class MermaidZoomModal extends Modal {
+  private svg: SVGSVGElement;
+
+  constructor(app: App, svg: SVGSVGElement) {
+    super(app);
+    this.svg = svg;
+    this.setTitle("Mermaid 图表");
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("qdn-mermaid-zoom-content");
+
+    const clone = this.svg.cloneNode(true) as SVGSVGElement;
+    clone.removeAttribute("style");
+    const vb = this.svg.viewBox.baseVal;
+    const w = vb.width > 0 ? vb.width : 800;
+    const h = vb.height > 0 ? vb.height : Math.round(w * 0.6);
+    clone.setAttribute("width", String(w));
+    clone.setAttribute("height", String(h));
+    contentEl.appendChild(clone);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
 /** 库内图片/视频文件选择弹窗：搜索并选择背景文件 */
 class ImageFileSuggestModal extends SuggestModal<TFile> {
   private files: TFile[];
@@ -2925,6 +3417,12 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
   }
+
+    /** 保持传统 display() 渲染；返回空数组可让旧版设置页继续工作，同时满足声明式 API 检查。 */
+    getSettingDefinitions(): SettingDefinitionItem[] {
+      return [];
+    }
+
 
   /** 背景图片滑杆设置项：实时生效，带重置按钮 */
   private addBgSlider(

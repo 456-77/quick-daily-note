@@ -11,7 +11,7 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 - In the sidebar calendar panel, double-click a date to open or create that day's note.
 
 ### ✅ Calendar & Todos
-- The calendar panel manages todos per day: add with the input box (Enter), check off, double-click to edit text, ✎ to modify, × to delete.
+- The calendar panel manages todos per day: add with the input box (Enter), check off, double-click to edit text, ✎ to modify, ⧉ to copy, × to delete.
 - When yesterday has unfinished todos, a "Carry over to today" banner appears at the top — one click moves them to today, marked as "carried over".
 - Below the calendar: stats for this month's diary days, consecutive diary days, and today's word count.
 
@@ -22,9 +22,10 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 - The command "Generate weekly review" summarizes the week's diaries (days, word count, titles) and completed/uncompleted todos into Markdown, inserted at the cursor.
 
 ### ⌨️ Paste Enhancements
-- Auto-detect the language of pasted code (30+ languages, zero dependencies) and wrap it in a fenced code block; plain text, single-line weak matches, and pastes inside code blocks are left alone.
+- Auto-detect the language of pasted code (30+ languages, including Mermaid diagrams, zero dependencies) and wrap it in a fenced code block; plain text, single-line weak matches, and pastes inside code blocks are left alone.
 - Optionally save pasted images into a configurable folder (vault-relative path; empty = vault root) and insert the link at the cursor (off by default).
 - **File explorer paste** — copy/cut files in the sidebar file explorer with `Ctrl/Cmd+C` / `Ctrl/Cmd+X`, then paste them into a target folder with `Ctrl/Cmd+V` (VS Code style, toggleable).
+- **Code block delete** — a delete button next to the native copy button on rendered code blocks (reading view & live preview) removes the whole block from the note.
 
 ### 🖼️ Image Enhancements
 - Images fit the note width automatically; overly tall images are height-limited.
@@ -33,7 +34,7 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 
 ### 📈 Mermaid Enhancements
 - Diagrams fit the container width (or render at original size), with a configurable height limit for tall diagrams.
-- Toolbar on the diagram: zoom in/out, reset, download as SVG or PNG (export scale configurable).
+- Toolbar above the diagram (outside the rendered frame): zoom in/out, reset, download as SVG or PNG (export scale configurable); click a diagram to view it enlarged.
 - Diagrams adapt to the page width when printing or exporting to PDF — never clipped.
 
 ### 🌤️ Weather Recording
@@ -71,6 +72,7 @@ Download the latest release from GitHub, and copy `main.js`, `manifest.json`, an
 | Open calendar & todo panel | Open the calendar and todo panel |
 | Set heading level for selection | Normalize headings in the selected text block (toggleable in settings) |
 | Generate weekly review | Summarize the week's diaries and todos at the cursor |
+| Back to previous cursor (same note) | Return to the previous cursor position in the current note; also triggered by the back shortcut (Alt+← / Cmd+Alt+←) |
 
 ### Image Toolbar Buttons
 

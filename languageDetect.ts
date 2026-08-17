@@ -65,6 +65,7 @@ const RULES: LangRule[] = [
   { lang: "java", weight: 3, re: /^\s*import\s+(static\s+)?java\./gm },
   { lang: "java", weight: 3, re: /@(Override|Test|Autowired|SpringBootApplication|Entity|Service|Controller|Component)\b/g },
   { lang: "java", weight: 2.5, re: /^\s*(public|private|protected)\s+(static\s+)?[\w<>,\s[\]]+\s+\w+\s*\([^)]*\)\s*\{/gm },
+    { lang: "java", weight: 2, re: /\b(?:List|Map|Set|Optional|ArrayList|HashMap|Collection|Iterator|StringBuilder)\s*<[A-Z]\w*(?:\s*,\s*[A-Z]\w*)*>/g },
   { lang: "java", weight: 2, re: /\b(public|private|protected)\s+class\s+\w+/g },
   { lang: "java", weight: 2, re: /String\[\]\s+args/g },
 
@@ -253,6 +254,10 @@ const RULES: LangRule[] = [
   { lang: "xml", weight: 3, re: /xmlns(:\w+)?=/g },
   { lang: "xml", weight: 2, re: /<\/\w+>/g },
   { lang: "xml", weight: 1.5, re: /<!DOCTYPE\s+\w+/gi },
+
+  // ---- Mermaid ----
+  { lang: "mermaid", weight: 5, re: /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|journey|mindmap|timeline|gitGraph|requirementDiagram|quadrantChart|sankey-beta|block-beta|architecture-beta|xyChart)\b/m },
+  { lang: "mermaid", weight: 3, re: /^\s*[A-Za-z0-9_()"']+\s*(-->|---|==>|-\.->|--x|--o|==|-.->)\s*[A-Za-z0-9_()"']/m, cap: 6 },
 ];
 
 /** 整段可解析的 JSON 直接判定；无法解析时按引号键数量打分 */

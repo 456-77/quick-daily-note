@@ -1,8 +1,8 @@
 {
   "id": "quick-daily-note",
   "name": "Quick Daily Note",
-  "version": "2.4.1",
-  "minAppVersion": "1.7.2",
+  "version": "2.4.2",
+  "minAppVersion": "1.8.7",
   "description": "快捷日记与待办：一键创建日记、日历面板按日期管理待办、定时提醒、粘贴代码自动识别语言、图片与 Mermaid 图表增强。Daily notes and todos: one-click diary creation, per-day todos in a calendar panel, reminders, paste code language detection, image and Mermaid enhancements.",
   "author": "shuiyi",
   "isDesktopOnly": false

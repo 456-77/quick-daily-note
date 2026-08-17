@@ -2,3 +2,5 @@ node_modules/
 main.js
 .DS_Store
 .link-test.mjs
+deploy-vaults.mjs
+.mimosa/

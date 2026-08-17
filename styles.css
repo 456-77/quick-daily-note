@@ -881,6 +881,11 @@ button.qdn-danger-btn {
    不透明度）；因此覆盖层避开标题栏区域，标题栏保持原生主题色、可正常拖动。 */
 body.qdn-bg-image {
   background-color: transparent;
+  /* ribbon 工具栏（含收起态）与状态栏使用独立背景变量，不在 workspace 层透明清单内，
+     收起侧边栏后不透明会遮挡背景图，一并透明化 */
+  --ribbon-background: transparent;
+  --ribbon-background-collapsed: transparent;
+  --status-bar-background: transparent;
 }
 
 body.qdn-bg-image::before {

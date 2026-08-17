@@ -701,12 +701,20 @@ export default class QuickDailyNotePlugin extends Plugin {
     const path = s.bgImagePath.trim();
     const enabled = s.bgEnabled && path.length > 0;
     document.body.toggleClass("qdn-bg-image", enabled);
-    // 背景层从标题栏下方开始，避免覆盖标题栏导致窗口无法拖动
+    // 背景层从标题栏下方开始：多轮实测确认覆盖层只要与拖拽区（标题栏等）区域重叠，
+    // 无论 z-index / 透明度都会使 Electron 窗口拖拽失效；标题栏保持原生主题色可拖
     const titlebar = document.querySelector<HTMLElement>(".titlebar");
     document.body.style.setProperty(
       "--qdn-bg-top",
       `${titlebar ? titlebar.offsetHeight : 0}px`,
     );
+    // 类切换兜底：仓库信息栏、编辑器工具栏等自带背景色的元素，CSS 级联可能被主题规则压掉，
+    // 用高特异性类（html body 前缀）保证露出背景图；关闭背景时移除类
+    for (const cls of ["workspace-sidedock-vault-profile", "view-header"]) {
+      document.querySelectorAll<HTMLElement>(`.${cls}`).forEach((el) => {
+        el.toggleClass("qdn-bg-transparent", enabled);
+      });
+    }
     if (!enabled) {
       document.body.style.removeProperty("--qdn-bg-url");
       document.body.style.removeProperty("--qdn-bg-opacity");

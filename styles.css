@@ -874,13 +874,13 @@ button.qdn-danger-btn {
   }
 }
 
-/* 自定义界面背景 */
+/* 自定义界面背景：覆盖层（::before / 视频）z-index: -1，位于所有内容之下，且从标题栏
+   下方开始（--qdn-bg-top 由 main.ts 注入）。
+   重要（Electron 限制，多轮实测确认）：覆盖层只要与拖拽区（标题栏/标签栏）区域重叠，
+   无论 z-index / 透明度都会使窗口拖拽失效（Chromium 拖拽区域裁剪判定基于层内容
+   不透明度）；因此覆盖层避开标题栏区域，标题栏保持原生主题色、可正常拖动。 */
 body.qdn-bg-image {
   background-color: transparent;
-  --background-primary: transparent;
-  --background-primary-alt: transparent;
-  --background-secondary: transparent;
-  --background-secondary-alt: transparent;
 }
 
 body.qdn-bg-image::before {
@@ -901,7 +901,9 @@ body.qdn-bg-image::before {
   pointer-events: none;
 }
 
-/* 各层背景透明化，露出背景图片（标题栏除外：背景从标题栏下方开始，不干扰窗口拖动） */
+/* 各层背景透明化，露出背景图片。
+   背景变量只在工作区层级覆盖为透明：modal/命令面板/右键菜单等浮层挂在 body 直接子级，
+   不受影响，否则浅色主题下弹窗会露出底层黑色遮罩而整页发黑。 */
 body.qdn-bg-image .app-container,
 body.qdn-bg-image .workspace,
 body.qdn-bg-image .workspace-split,
@@ -914,6 +916,24 @@ body.qdn-bg-image .markdown-source-view,
 body.qdn-bg-image .markdown-preview-view,
 body.qdn-bg-image .workspace-ribbon,
 body.qdn-bg-image .status-bar {
+  background-color: transparent;
+  --background-primary: transparent;
+  --background-primary-alt: transparent;
+  --background-secondary: transparent;
+  --background-secondary-alt: transparent;
+}
+
+/* 其余自带背景色的工作区元素直接透明（不参与窗口拖拽）：仓库信息栏、头部工具栏、标签页 */
+/* 高特异性兜底（对应 main.ts 的类切换）：类名连写 + 父链前缀，主题规则压不掉 */
+html body.qdn-bg-image .workspace-split.mod-left-split .workspace-sidedock-vault-profile.qdn-bg-transparent,
+html body.qdn-bg-image .view-header.qdn-bg-transparent {
+  background-color: transparent;
+}
+html body.qdn-bg-image .workspace-split.mod-left-split .workspace-sidedock-vault-profile,
+body.qdn-bg-image .view-header,
+body.qdn-bg-image .workspace-leaf.mod-active .view-header,
+body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header.is-active,
+body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header:not(.is-active):hover .workspace-tab-header-inner {
   background-color: transparent;
 }
 

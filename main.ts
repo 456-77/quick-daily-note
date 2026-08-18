@@ -71,6 +71,10 @@ interface QuickDailyNoteSettings {
   /** 每天检查未完成待办并提醒 */
   checkReminderEnabled: boolean;
   checkReminderTime: string;
+  /** 邮件通知总开关（经 Web3Forms 转发到自定义邮箱） */
+  emailNotifyEnabled: boolean;
+  /** Web3Forms access key */
+  emailAccessKey: string;
   /** 粘贴代码时自动识别语言并生成代码块 */
   autoDetectCodeLang: boolean;
   /** 启用"选中文本设置标题等级"命令 */
@@ -79,8 +83,10 @@ interface QuickDailyNoteSettings {
   autoSavePastedImages: boolean;
   /** 粘贴其他文件自动保存到指定目录 */
   autoSavePastedFiles: boolean;
-  /** 文件管理器粘贴增强（资源管理器式 Ctrl+C/V） */
+  /** 文件管理器复制/粘贴增强（资源管理器式 Ctrl+C/X/V） */
   explorerPasteEnabled: boolean;
+  /** 显示仓库中的隐藏文件（同步 Obsidian 全局设置） */
+  showHiddenFiles: boolean;
   /** 粘贴图片保存目录（vault 内相对路径） */
   pastedImageFolder: string;
   /** 图片渲染增强 */
@@ -127,11 +133,14 @@ const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
   todoReminderTime: "08:00",
   checkReminderEnabled: false,
   checkReminderTime: "21:00",
+  emailNotifyEnabled: false,
+  emailAccessKey: "",
   autoDetectCodeLang: true,
   enableHeadingLevelCommand: true,
   autoSavePastedImages: false,
   autoSavePastedFiles: false,
   explorerPasteEnabled: true,
+  showHiddenFiles: false,
   pastedImageFolder: "attachments",
   imageEnhancerEnabled: true,
   imageMaxHeightPct: 70,
@@ -346,15 +355,18 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("layout-change", () => this.processRendered()));
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.processRendered()));
     this.registerEvent(
-      this.app.workspace.on("file-open", () => window.setTimeout(() => this.processRendered(), 200)),
+      this.app.workspace.on("file-open", (file) => {
+        window.setTimeout(() => this.processRendered(), 200);
+        if (file) window.setTimeout(() => this.restoreCursorOnOpen(file), 100);
+      }),
     );
     this.updateImageEnhancer();
     this.app.workspace.onLayoutReady(() => this.processMermaids());
 
     document.addEventListener("click", this.zoomClickHandler, true);
-    document.addEventListener("keydown", this.handleExplorerKeys);
-    document.addEventListener("click", this.handleExplorerClick);
-    document.addEventListener("paste", this.handleExplorerPaste);
+    document.addEventListener("click", this.handleExplorerClick, true);
+    document.addEventListener("keydown", this.handleExplorerKeys, true);
+    document.addEventListener("paste", this.handleExplorerPaste, true);
     document.addEventListener("mousedown", this.handleCursorMousedown, true);
     document.addEventListener("mouseup", this.handleCursorMouseup);
     window.addEventListener("keydown", this.handleCursorBackKeys, true);
@@ -380,9 +392,9 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.mermaidObserver?.disconnect();
     this.mermaidObserver = null;
     document.removeEventListener("click", this.zoomClickHandler, true);
-    document.removeEventListener("keydown", this.handleExplorerKeys);
-    document.removeEventListener("click", this.handleExplorerClick);
-    document.removeEventListener("paste", this.handleExplorerPaste);
+    document.removeEventListener("click", this.handleExplorerClick, true);
+    document.removeEventListener("keydown", this.handleExplorerKeys, true);
+    document.removeEventListener("paste", this.handleExplorerPaste, true);
     document.removeEventListener("mousedown", this.handleCursorMousedown, true);
     document.removeEventListener("mouseup", this.handleCursorMouseup);
     window.removeEventListener("keydown", this.handleCursorBackKeys, true);
@@ -404,6 +416,16 @@ export default class QuickDailyNotePlugin extends Plugin {
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<QuickDailyNoteSettings>);
+    // 隐藏文件开关以 Obsidian 全局配置为准（插件开关是全局设置的镜像）
+    this.settings.showHiddenFiles = !!this.vaultConfig().getConfig("showHiddenFiles");
+  }
+
+  /** Vault 全局配置读写（obsidian typings 未声明 getConfig/setConfig，运行时可用） */
+  vaultConfig(): { getConfig(key: string): unknown; setConfig(key: string, value: unknown): void } {
+    return this.app.vault as unknown as {
+      getConfig(key: string): unknown;
+      setConfig(key: string, value: unknown): void;
+    };
   }
 
   async saveSettings() {
@@ -1726,6 +1748,8 @@ export default class QuickDailyNotePlugin extends Plugin {
       if (e.button !== 0) return;
       const target = e.target as HTMLElement | null;
       if (!target?.closest(".cm-content, .markdown-source-view")) return;
+      // 点击编辑器文本：清除文件管理器选中（之后粘贴保持原生文本行为）
+      this.explorerSelection = null;
       const view = this.app.workspace.getActiveViewOfType(MarkdownView);
       if (!view?.file || !view.editor) return;
       this.pushCursorSnapshot(view.file.path, view.editor, view.editor.getCursor());
@@ -1805,125 +1829,89 @@ export default class QuickDailyNotePlugin extends Plugin {
       return true;
     }
 
+    /** 打开文件时若光标落在 (0,0) 且记录过该文件上次位置，则恢复（Obsidian 部分场景不恢复光标） */
+    private restoreCursorOnOpen(file: TFile): void {
+      const snap = this.lastCursors.get(file.path);
+      if (!snap) return;
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!view || view.file !== file || !view.editor) return;
+      const cur = view.editor.getCursor();
+      if (cur.line === 0 && cur.ch === 0) {
+        view.editor.setCursor(snap);
+      }
+    }
+
 
   // ------------------------------------------------------------
-  // 文件管理器粘贴增强（类似 VS Code 的资源管理器式复制粘贴）
+  // 文件管理器复制/粘贴增强（类似资源管理器：选中文件或文件夹复制/剪切，粘贴到目标目录）
   // ------------------------------------------------------------
 
-  /** 资源管理器复制/剪切缓存 */
-  private explorerClip: { file: TFile; cut: boolean } | null = null;
+  /** 复制/剪切内部剪贴板（cut=true 表示移动，粘贴后清空） */
+  private explorerClip: { path: string; isFolder: boolean; cut: boolean } | null = null;
 
-  /** 文件管理器中最近点击选中的项（点击后焦点不一定在导航元素上，需要自己记录） */
+  /** 文件管理器中最近点击选中的项（capture 阶段记录，Obsidian 内部 stopPropagation 也能收到） */
   private explorerSelection: { path: string; isFolder: boolean } | null = null;
 
-  /** 记录文件管理器中的点击选中项 */
+  /** 文件资源管理器视图容器（限定点击与高亮查找范围，避免误收搜索结果等） */
+  private explorerContainer(): HTMLElement | null {
+    const leaf = this.app.workspace.getLeavesOfType("file-explorer")[0];
+    return leaf?.view.containerEl ?? null;
+  }
+
+  /** 从带 data-path 的导航元素解析选中项：以 vault 实际对象判定文件/文件夹，不依赖具体类名 */
+  private selectionFromDom(el: Element): { path: string; isFolder: boolean } | null {
+    const path = normalizePath(el.getAttribute("data-path") ?? "");
+    if (!path) return null;
+    const abs = this.app.vault.getAbstractFileByPath(path);
+    if (abs instanceof TFile) return { path: abs.path, isFolder: false };
+    if (abs instanceof TFolder) return { path: abs.path, isFolder: true };
+    return null;
+  }
+
+  /** 记录文件管理器中的点击选中项（capture 阶段，先于 Obsidian 自身处理） */
   private handleExplorerClick = (e: MouseEvent): void => {
     const target = e.target as Element | null;
-    const navFile = target?.closest(".nav-file");
-    const navFolder = target?.closest(".nav-folder");
-    if (navFile) {
-      const path = navFile.getAttribute("data-path");
-      if (path !== null) {
-        this.explorerSelection = { path, isFolder: false };
+    if (!target) return;
+    if (!this.explorerContainer()?.contains(target)) return;
+    const nav = target.closest<HTMLElement>("[data-path]");
+    if (nav) {
+      const sel = this.selectionFromDom(nav);
+      if (sel) {
+        this.explorerSelection = sel;
         return;
       }
     }
-    if (navFolder) {
-      const path = this.folderPathFromDom(navFolder);
-      if (path !== null) {
-        this.explorerSelection = { path, isFolder: true };
-        return;
-      }
-    }
-    if (!navFile && !navFolder && target?.closest(".nav-files-container")) {
-      // 点击文件管理器的空白区域：视为选中库根目录
+    // 点击文件管理器的空白区域：视为选中库根目录
+    if (target.closest(".nav-files-container")) {
       this.explorerSelection = { path: "", isFolder: true };
     }
   };
 
-  /** 解析当前文件管理器选中项：焦点所在导航项优先，其次最近点击项 */
+  /** 解析当前文件管理器选中项：最近点击 → 焦点所在导航项 → 文件管理器中高亮打开的文件 */
   private currentSelection(): { path: string; isFolder: boolean } | null {
+    if (this.explorerSelection) return this.explorerSelection;
     const active = document.activeElement;
-    if (active?.tagName === "BODY") return this.explorerSelection;
     if (
       active?.instanceOf(HTMLElement) &&
       !active.isContentEditable &&
       active.tagName !== "INPUT" &&
       active.tagName !== "TEXTAREA"
     ) {
-      const navFile = active.closest(".nav-file");
-      if (navFile) {
-        const path = navFile.getAttribute("data-path");
-        if (path !== null) return { path, isFolder: false };
+      const nav = active.closest<HTMLElement>("[data-path]");
+      if (nav) {
+        const sel = this.selectionFromDom(nav);
+        if (sel) return sel;
       }
-      const navFolder = active.closest(".nav-folder");
-      if (navFolder) {
-        const path = this.folderPathFromDom(navFolder);
-        if (path !== null) return { path, isFolder: true };
-      }
+    }
+    const highlighted = this.explorerContainer()?.querySelector<HTMLElement>(
+      ".nav-file.is-active, .nav-folder-title.is-active, .nav-folder.is-active"
+    );
+    if (highlighted) {
+      const sel = this.selectionFromDom(highlighted);
+      if (sel) return sel;
     }
     return null;
   }
-
-  /** 从文件夹 DOM 解析路径：优先 data-path 属性，缺失时按标题层级拼接并校验 */
-  private folderPathFromDom(folderEl: Element): string | null {
-    const attr = folderEl.getAttribute("data-path");
-    if (attr !== null) return attr;
-    const parts: string[] = [];
-    let cur: Element | null = folderEl;
-    while (cur && cur.classList.contains("nav-folder")) {
-      const isRoot =
-        cur.classList.contains("mod-root") ||
-        cur.parentElement?.classList.contains("nav-files-container");
-      if (!isRoot) {
-        const name = cur.querySelector(".nav-folder-title-content")?.textContent?.trim();
-        if (name) parts.unshift(name);
-      }
-      cur = cur.parentElement?.closest(".nav-folder") ?? null;
-    }
-    if (parts.length === 0) return null;
-    const path = normalizePath(parts.join("/"));
-    const folder = this.app.vault.getAbstractFileByPath(path);
-    return folder && "children" in folder ? path : null;
-  }
-
-  /** 文件管理器 Ctrl+C / Ctrl+X / Ctrl+V 处理 */
-  private handleExplorerKeys = (e: KeyboardEvent): void => {
-    if (!this.settings.explorerPasteEnabled) return;
-    const mod = e.ctrlKey || e.metaKey;
-    if (!mod) return;
-    const selected = this.currentSelection();
-    if (!selected) return;
-
-    const key = e.key.toLowerCase();
-    if (key === "c" || key === "x") {
-      if (selected.isFolder) return;
-      e.preventDefault();
-      const file = this.app.vault.getAbstractFileByPath(selected.path);
-      if (!file || !(file instanceof TFile)) return;
-      this.explorerClip = { file, cut: key === "x" };
-      new Notice(`${key === "x" ? "已剪切" : "已复制"}：${file.name}`, 2000);
-      return;
-    }
-    if (key === "v" && this.explorerClip) {
-      // 库内复制/剪切：直接处理；无内部剪贴板时不拦截，交给 paste 事件导入系统剪贴板文件
-      e.preventDefault();
-      const target = selected.isFolder ? selected.path : this.parentOf(selected.path);
-      void this.pasteExplorerFile(target);
-    }
-  };
-
-  /** 导入系统剪贴板中的文件（从文件管理器外部复制后粘贴） */
-  private handleExplorerPaste = (e: ClipboardEvent): void => {
-    if (!this.settings.explorerPasteEnabled) return;
-    const files = e.clipboardData?.files;
-    if (!files || files.length === 0) return;
-    const selected = this.currentSelection();
-    if (!selected) return;
-    e.preventDefault();
-    const target = selected.isFolder ? selected.path : this.parentOf(selected.path);
-    void this.importExternalFiles(target, Array.from(files));
-  };
 
   /** 取文件所在目录（根目录返回空串） */
   private parentOf(path: string): string {
@@ -1946,30 +1934,169 @@ export default class QuickDailyNotePlugin extends Plugin {
     return dest;
   }
 
-  /** 执行粘贴：复制或移动库内文件到目标目录 */
-  private async pasteExplorerFile(targetPath: string) {
+  /** 生成不重名的文件夹路径：重名时在末尾加序号 */
+  private uniqueFolderPath(parent: string, name: string): string {
+    const prefix = parent ? `${parent}/` : "";
+    let dest = normalizePath(`${prefix}${name}`);
+    let i = 1;
+    while (this.app.vault.getAbstractFileByPath(dest)) {
+      dest = normalizePath(`${prefix}${name} ${i}`);
+      i++;
+    }
+    return dest;
+  }
+
+  /** 文件管理器 Ctrl+C / Ctrl+X / Ctrl+V 处理（capture 阶段，先于 Obsidian 自身快捷键） */
+  private handleExplorerKeys = (e: KeyboardEvent): void => {
+    // 在编辑器/输入框中输入普通按键：清除文件管理器选中，避免旧选中劫持文本粘贴
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && this.isTextContext()) {
+      this.explorerSelection = null;
+    }
+    if (!this.settings.explorerPasteEnabled) return;
+    if (e.repeat) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod || e.shiftKey || e.altKey) return;
+    const key = e.key.toLowerCase();
+    if (key === "v") {
+      const selected = this.currentSelection();
+      // 有选中项时（即使焦点在编辑器）粘贴到选中目录；无选中项时仅非文本上下文拦截
+      if (this.explorerClip && (selected || !this.isTextContext())) {
+        e.preventDefault();
+        e.stopPropagation();
+        const target = selected ? (selected.isFolder ? selected.path : this.parentOf(selected.path)) : this.pasteTarget();
+        void this.pasteClip(target ?? "");
+      }
+      // 内部剪贴板为空时不拦截，交给 paste 事件导入系统剪贴板中的文件
+      return;
+    }
+    if (key === "c" || key === "x") {
+      if (this.hasTextSelection()) return; // 已选中文本：保持原生复制
+      const selected = this.currentSelection();
+      if (!selected || (selected.isFolder && !selected.path)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.explorerClip = { path: selected.path, isFolder: selected.isFolder, cut: key === "x" };
+      const name = selected.path.split("/").pop();
+      new Notice(`${key === "x" ? "已剪切" : "已复制"}：${name}`, 2000);
+    }
+  };
+
+  /** 是否处于文本选中状态（输入框/编辑器内选中了文字）——复制不拦截 */
+  private hasTextSelection(): boolean {
+    const active = document.activeElement;
+    if (!active) return false;
+    if (active.tagName === "TEXTAREA" || active.tagName === "INPUT") {
+      const el = active as HTMLTextAreaElement | HTMLInputElement;
+      return el.selectionStart !== el.selectionEnd;
+    }
+    if (active.instanceOf(HTMLElement) && active.isContentEditable) {
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) return true;
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      return !!view?.editor && view.editor.getSelection().length > 0;
+    }
+    return false;
+  }
+
+  /** 是否处于文本粘贴上下文（焦点在编辑器/输入框）——粘贴不拦截 */
+  private isTextContext(): boolean {
+    const active = document.activeElement;
+    if (!active) return false;
+    if (
+      active.tagName === "TEXTAREA" ||
+      active.tagName === "INPUT" ||
+      (active.instanceOf(HTMLElement) && active.isContentEditable)
+    ) {
+      return true;
+    }
+    return !!active.closest(".cm-content, .cm-editor, .markdown-source-view, .markdown-preview-view");
+  }
+
+  /** 粘贴目标目录：选中的文件夹 → 选中文件所在目录 → 当前打开文件所在目录 */
+  private pasteTarget(): string | null {
+    const selected = this.currentSelection();
+    if (selected) return selected.isFolder ? selected.path : this.parentOf(selected.path);
+    const active = this.app.workspace.getActiveFile();
+    return active ? this.parentOf(active.path) : null;
+  }
+
+  /** 导入系统剪贴板中的文件（从系统资源管理器复制后粘贴进库） */
+  private handleExplorerPaste = (e: ClipboardEvent): void => {
+    if (!this.settings.explorerPasteEnabled) return;
+    const files = e.clipboardData?.files;
+    if (!files || files.length === 0) return;
+    // 文件管理器中已有选中项时，即使焦点在编辑器也粘贴到选中目录（避免文件被粘进笔记内容）
+    if (!this.currentSelection() && this.isTextContext()) return; // 无选中且焦点在编辑器：交给 Obsidian 原生附件粘贴
+    e.preventDefault();
+    e.stopPropagation();
+    void this.importExternalFiles(this.pasteTarget() ?? "", Array.from(files));
+  };
+
+  /** 执行粘贴：复制或移动剪贴板中的文件/文件夹到目标目录（移动后清空剪贴板，复制可多次粘贴） */
+  private async pasteClip(targetDir: string): Promise<void> {
     const clip = this.explorerClip;
     if (!clip) return;
-    this.explorerClip = null;
+    // 文件夹不能粘贴到自身或其内部目录
+    if (clip.isFolder && targetDir.startsWith(clip.path + "/")) {
+      new Notice("不能粘贴到自身或其内部目录");
+      return;
+    }
     try {
-      const src = clip.file;
-      const srcDir = src.path.includes("/") ? src.path.slice(0, src.path.lastIndexOf("/")) : "";
-      if (clip.cut && targetPath === srcDir) return;
-      const dest = this.uniquePath(targetPath, src.name);
-      if (clip.cut) {
-        await this.app.fileManager.renameFile(src, dest);
-        new Notice(`已移动 ${src.name} → ${dest}`, 2500);
+      if (clip.isFolder) {
+        const folder = this.app.vault.getAbstractFileByPath(clip.path);
+        if (!folder || !(folder instanceof TFolder)) {
+          new Notice("源文件夹不存在或已被移动");
+          return;
+        }
+        if (clip.cut) {
+          if (targetDir === this.parentOf(clip.path)) return; // 已在该目录
+          await this.app.fileManager.renameFile(folder, this.uniqueFolderPath(targetDir, folder.name));
+          new Notice(`已移动 ${folder.name} → ${targetDir || "库根目录"}`, 2500);
+          this.explorerClip = null;
+        } else {
+          await this.copyFolder(clip.path, targetDir);
+        }
       } else {
-        await this.app.vault.copy(src, dest);
-        new Notice(`已复制 ${src.name} → ${dest}`, 2500);
+        const src = this.app.vault.getAbstractFileByPath(clip.path);
+        if (!src || !(src instanceof TFile)) {
+          new Notice("源文件不存在或已被移动");
+          return;
+        }
+        const dest = this.uniquePath(targetDir, src.name);
+        if (clip.cut) {
+          if (targetDir === this.parentOf(src.path)) return; // 已在该目录
+          await this.app.fileManager.renameFile(src, dest);
+          new Notice(`已移动 ${src.name} → ${dest || "库根目录"}`, 2500);
+          this.explorerClip = null;
+        } else {
+          await this.app.vault.copy(src, dest);
+          new Notice(`已复制 ${src.name} → ${dest || "库根目录"}`, 2500);
+        }
       }
     } catch (err) {
-      console.error("Quick Daily Note: 资源管理器粘贴失败", err);
+      console.error("Quick Daily Note: 粘贴失败", err);
       new Notice("粘贴失败，请查看控制台");
     }
   }
 
-  /** 将系统剪贴板中的文件导入目标目录 */
+  /** 递归复制整个文件夹到目标目录（目标下生成同名子文件夹，重名自动加序号） */
+  private async copyFolder(srcPath: string, targetDir: string): Promise<void> {
+    const folder = this.app.vault.getAbstractFileByPath(srcPath);
+    if (!folder || !("children" in folder)) {
+      new Notice("源文件夹不存在或已被移动");
+      return;
+    }
+    const name = srcPath.split("/").pop() ?? "";
+    const destFolder = this.uniqueFolderPath(targetDir, name);
+    const files = this.app.vault.getFiles().filter((f) => f.path.startsWith(srcPath + "/"));
+    for (const file of files) {
+      const rel = file.path.slice(srcPath.length + 1);
+      await this.app.vault.copy(file, normalizePath(`${destFolder}/${rel}`));
+    }
+    new Notice(`已复制文件夹 ${name}（${files.length} 个文件）→ ${destFolder || "库根目录"}`, 2500);
+  }
+
+  /** 将系统剪贴板中的文件导入目标目录（从系统资源管理器复制后粘贴进库） */
   private async importExternalFiles(targetPath: string, files: File[]) {
     try {
       const folder = normalizePath(targetPath.trim());
@@ -2092,23 +2219,31 @@ export default class QuickDailyNotePlugin extends Plugin {
     return f instanceof TFolder ? f : null;
   }
 
-  /** 在指定文件夹中查找日期前缀匹配的日记文件，多篇时返回名字排序第一篇 */
+  /** 在指定文件夹中查找日期匹配的日记文件（精确日期名或“日期 名字”前缀），多篇时返回名字排序第一篇 */
   findDailyNote(
     folder: TAbstractFile | null,
     dateStr: string
   ): TFile | null {
     if (!(folder instanceof TFolder)) return null;
+    return this.dailyNotesIn(folder, dateStr)[0] ?? null;
+  }
 
-    const matches = folder.children.filter(
-      (child): child is TFile =>
-        child instanceof TFile &&
-        child.extension === "md" &&
-        child.name.startsWith(`${dateStr} `)
-    );
-    if (matches.length === 0) return null;
+  /** 过滤出某文件夹中当天的全部日记文件（精确日期名或“日期 名字”前缀），按名字排序 */
+  private dailyNotesIn(folder: TFolder, dateStr: string): TFile[] {
+    return folder.children
+      .filter(
+        (child): child is TFile =>
+          child instanceof TFile &&
+          child.extension === "md" &&
+          (child.name === `${dateStr}.md` || child.name.startsWith(`${dateStr} `))
+      )
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
 
-    matches.sort((a, b) => a.name.localeCompare(b.name));
-    return matches[0];
+  /** 查找配置的日记文件夹中当天的全部日记文件（供日历面板展示），按名字排序 */
+  findDailyNotes(dateStr: string): TFile[] {
+    const folder = this.getDiaryFolder();
+    return folder ? this.dailyNotesIn(folder, dateStr) : [];
   }
 
   /** 收集文件夹内所有日记文件的日期集合（用于日历打点标记） */
@@ -2122,7 +2257,7 @@ export default class QuickDailyNotePlugin extends Plugin {
 
     for (const child of folder.children) {
       if (child instanceof TFile && child.extension === "md") {
-        const firstPart = child.name.split(" ")[0];
+        const firstPart = child.basename.split(" ")[0];
         if (firstPart) set.add(firstPart);
       }
     }
@@ -2333,6 +2468,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.settings.todos[dateStr].push({ text: trimmed, done: false });
     await this.saveSettings();
     this.refreshViews();
+    void this.sendEmail(`新待办（${dateStr}）`, `已添加待办：${trimmed}`);
   }
 
   async toggleTodo(dateStr: string, index: number) {
@@ -2452,6 +2588,14 @@ export default class QuickDailyNotePlugin extends Plugin {
           notice.hide();
           void this.openCalendarView();
         });
+        const pendingList = (this.settings.todos[moment().format(this.settings.dateFormat)] ?? [])
+          .filter((item) => !item.done)
+          .map((item) => `- ${item.text}`)
+          .join("\n");
+        void this.sendEmail(
+          `未完成待办提醒（${todayStr}）`,
+          `今天还有 ${pendingCount} 项待办未完成：\n${pendingList}`
+        );
       }
     }
   }
@@ -2462,6 +2606,74 @@ export default class QuickDailyNotePlugin extends Plugin {
     return (this.settings.todos[todayStr] ?? []).filter(
       (item) => !item.done
     ).length;
+  }
+
+  /**
+   * 发送邮件通知（经 Web3Forms 转发到自定义邮箱）。
+   * 仅在启用且已配置 access key 时发送；失败只提示，不阻塞主流程。
+   */
+  async sendEmail(subject: string, message: string): Promise<void> {
+    if (!this.settings.emailNotifyEnabled) return;
+    const key = this.settings.emailAccessKey.trim();
+    if (!key) return;
+    const url = "https://api.web3forms.com/submit";
+    if (!this.isSafeExternalUrl(url)) {
+      console.error("Quick Daily Note: 邮件接口地址校验未通过", url);
+      return;
+    }
+    try {
+      const resp = await requestUrl({
+        url,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          access_key: key,
+          subject,
+          message,
+          from_name: "Quick Daily Note",
+        }),
+      });
+      if (resp.status >= 200 && resp.status < 300) {
+        new Notice("邮件通知已发送");
+      } else {
+        console.error("Quick Daily Note: 邮件发送失败", resp.status, resp.text);
+        new Notice("邮件发送失败，请检查 Access Key 是否正确");
+      }
+    } catch (err) {
+      console.error("Quick Daily Note: 邮件发送异常", err);
+      new Notice("邮件发送失败，请检查网络连接");
+    }
+  }
+
+  /** 校验外部请求 URL：仅允许 http/https 且 host 为公网地址（拒绝 localhost/环回/私有/保留地址） */
+  private isSafeExternalUrl(url: string): boolean {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return false;
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host === "localhost" || host.endsWith(".localhost")) return false;
+
+    // IPv4：拒绝环回/私有/链路本地/保留/组播/广播段
+    const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4) {
+      const a = Number(ipv4[1]);
+      const b = Number(ipv4[2]);
+      if (a === 0 || a === 127 || a === 255) return false;
+      if (a === 10 || (a === 192 && b === 168)) return false;
+      if (a === 172 && b >= 16 && b <= 31) return false;
+      if (a === 169 && b === 254) return false; // 链路本地
+      if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT
+      if (a === 198 && (b === 18 || b === 19)) return false;
+      if (a >= 224) return false; // 组播/保留
+    }
+    // IPv6：环回/未指定/链路本地/唯一本地/映射地址
+    if (host === "::1" || host === "::") return false;
+    if (host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("::ffff:")) return false;
+    return true;
   }
 }
 
@@ -2534,7 +2746,10 @@ class CalendarView extends ItemView {
     containerEl.empty();
     containerEl.addClass("qdn-panel");
     this.renderCalendar(containerEl);
+    this.renderDayNotes(containerEl);
     this.renderTodos(containerEl);
+    // 底部占位：保证待办输入框不被右下角悬浮状态栏遮挡
+    containerEl.createDiv("qdn-panel-spacer");
   }
 
   private renderCalendar(root: HTMLElement) {
@@ -2635,6 +2850,30 @@ class CalendarView extends ItemView {
       el.setText(`今日 ${content.replace(/\s+/g, "").length} 字`);
     } catch {
       el.setText("今日 0 字");
+    }
+  }
+
+  /** 当天日记列表：显示选中日期创建的所有日记标题，点击跳转；支持同一天多份日记 */
+  private renderDayNotes(root: HTMLElement) {
+    const notes = this.plugin.findDailyNotes(this.selectedDate);
+    const wrapper = root.createDiv("qdn-day-notes");
+    const header = wrapper.createDiv("qdn-day-notes-header");
+    header.createSpan({ cls: "qdn-day-notes-title" }).setText(`当天日记（${notes.length}）`);
+    header
+      .createEl("button", { text: "＋ 新建", cls: "qdn-day-notes-add" })
+      .addEventListener("click", () => {
+        new CreateDailyNoteModal(this.plugin.app, this.plugin, this.selectedDate).open();
+      });
+    if (notes.length === 0) {
+      wrapper.createDiv("qdn-day-notes-empty").setText("当天还没有日记");
+      return;
+    }
+    for (const file of notes) {
+      const row = wrapper.createDiv("qdn-day-note");
+      row.setText(file.basename);
+      row.addEventListener("click", () => {
+        void this.plugin.app.workspace.getLeaf(false).openFile(file);
+      });
     }
   }
 
@@ -3545,7 +3784,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("粘贴文件保存到指定目录")
-      .setDesc("粘贴非图片文件（如 PDF、Word、压缩包）时自动保存到下方目录并插入链接。")
+      .setDesc("在编辑器中粘贴非图片文件（如 PDF、Word、压缩包）时自动保存到下方目录并插入链接；不影响文件管理器的复制/粘贴增强。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.autoSavePastedFiles)
@@ -3569,13 +3808,27 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("文件管理器粘贴增强")
-      .setDesc("在左侧文件管理器中：Ctrl/Cmd+C、Ctrl/Cmd+X 复制或剪切库内文件，Ctrl/Cmd+V 粘贴到目标文件夹；也可把系统剪贴板中的文件（如从文件夹复制的）直接粘贴进来（类似 VS Code）。")
+      .setName("文件管理器复制/粘贴增强")
+      .setDesc("在左侧文件管理器中选中文件或文件夹后：Ctrl/Cmd+C 复制、Ctrl/Cmd+X 剪切、Ctrl/Cmd+V 粘贴到选中的文件夹或选中文件所在目录（文件夹整体复制/移动，重名自动加序号）；从系统资源管理器复制的文件也可直接粘贴进库。编辑器内选中文本时复制粘贴保持原生行为。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.explorerPasteEnabled)
           .onChange(async (value) => {
             this.plugin.settings.explorerPasteEnabled = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("显示隐藏文件")
+      .setDesc("显示仓库中被 Obsidian 默认隐藏的文件：以 . 开头的隐藏文件/文件夹，以及 Obsidian 无法渲染的文件类型。会同步修改 Obsidian 全局设置（设置 → 文件与链接 → 显示隐藏文件 / 检测所有文件扩展名）。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.showHiddenFiles)
+          .onChange(async (value) => {
+            this.plugin.settings.showHiddenFiles = value;
+            this.plugin.vaultConfig().setConfig("showHiddenFiles", value);
+            this.plugin.vaultConfig().setConfig("showUnsupportedFiles", value);
             await this.plugin.saveSettings();
           })
       );
@@ -3836,6 +4089,56 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
           this.plugin.setupReminderTimer();
         });
       });
+
+    new Setting(containerEl).setName("邮件通知").setHeading();
+
+    new Setting(containerEl)
+      .setName("启用邮件通知")
+      .setDesc("添加待办、未完成待办检查触发时，同时发送邮件到你的自定义邮箱。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.emailNotifyEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.emailNotifyEnabled = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Access Key")
+      .setDesc("Web3Forms 访问密钥。配置方法：打开 web3forms.com → 输入你的收件邮箱并提交 → 复制生成的 Access Key 填到这里（免费额度 250 封/月）。")
+      .addText((text) =>
+        text
+          .setPlaceholder("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+          .setValue(this.plugin.settings.emailAccessKey)
+          .onChange(async (value) => {
+            this.plugin.settings.emailAccessKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("发送测试邮件")
+      .setDesc("用当前配置发送一封测试邮件，验证 Access Key 是否有效（实际收件人为注册 Web3Forms 时填写的邮箱）。")
+      .addButton((btn) =>
+        btn
+          .setButtonText("发送测试邮件")
+          .setCta()
+          .onClick(() => {
+            if (!this.plugin.settings.emailNotifyEnabled) {
+              new Notice("请先开启「启用邮件通知」开关");
+              return;
+            }
+            if (!this.plugin.settings.emailAccessKey.trim()) {
+              new Notice("请先填写 Access Key");
+              return;
+            }
+            void this.plugin.sendEmail(
+              "Quick Daily Note 测试邮件",
+              "这是一封来自 Quick Daily Note 的测试邮件。如果你收到了它，说明邮件通知配置成功。"
+            );
+          })
+      );
 
     new Setting(containerEl).setName("使用说明").setHeading();
 

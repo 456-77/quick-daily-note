@@ -14,9 +14,11 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 - The calendar panel manages todos per day: add with the input box (Enter), check off, double-click to edit text, ✎ to modify, ⧉ to copy, × to delete.
 - When yesterday has unfinished todos, a "Carry over to today" banner appears at the top — one click moves them to today, marked as "carried over".
 - Below the calendar: stats for this month's diary days, consecutive diary days, and today's word count.
+- **Multiple daily notes per day** — click a date in the calendar panel to list all daily notes created for that day; click a title to jump to that note, or use ＋ New to create another one for the same day.
 
 ### ⏰ Reminders
 - Scheduled prompts to add a todo, or to check the day's unfinished todos; clicking the notification opens the calendar panel.
+- **Email notifications** — when a todo is added, or the daily unfinished-todo check finds pending items, an email is sent to your custom mailbox (via Web3Forms, free tier ~250/month). Toggleable in settings; configure the Access Key from web3forms.com and your recipient email there.
 
 ### 📊 Weekly Review
 - The command "Generate weekly review" summarizes the week's diaries (days, word count, titles) and completed/uncompleted todos into Markdown, inserted at the cursor.
@@ -24,7 +26,7 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 ### ⌨️ Paste Enhancements
 - Auto-detect the language of pasted code (30+ languages, including Mermaid diagrams, zero dependencies) and wrap it in a fenced code block; plain text, single-line weak matches, and pastes inside code blocks are left alone.
 - Optionally save pasted images into a configurable folder (vault-relative path; empty = vault root) and insert the link at the cursor (off by default).
-- **File explorer paste** — copy/cut files in the sidebar file explorer with `Ctrl/Cmd+C` / `Ctrl/Cmd+X`, then paste them into a target folder with `Ctrl/Cmd+V` (VS Code style, toggleable).
+- **File explorer copy/paste** — with a file or folder selected in the sidebar file explorer, `Ctrl/Cmd+C` / `Ctrl/Cmd+X` copy or cut it (folders included, copied recursively), and `Ctrl/Cmd+V` pastes it into the selected folder, or the folder of the selected file — even while that file is open — (duplicates get a numbered suffix); files copied from the system file manager can be pasted into the vault the same way. Copying/pasting text in the editor keeps its native behavior. Toggleable in settings.
 - **Code block delete** — a delete button next to the native copy button on rendered code blocks (reading view & live preview) removes the whole block from the note.
 
 ### 🖼️ Image Enhancements
@@ -100,8 +102,10 @@ Download the latest release from GitHub, and copy `main.js`, `manifest.json`, an
 | Auto-detect code language on paste | On by default |
 | Set heading level for selection | On by default |
 | Save pasted images to a folder | Off by default |
-| Save pasted files to a folder | Off by default |
-| File explorer paste enhancement | Copy/cut files with Ctrl/Cmd+C/X, paste with Ctrl/Cmd+V in the file explorer; on by default |
+| Save pasted files to a folder (pasting in the editor) | Off by default |
+| File explorer copy/paste | Copy/cut files & folders with Ctrl/Cmd+C/X, paste with Ctrl/Cmd+V in the file explorer; also imports files copied from the system file manager; on by default |
+| Show hidden files | Show dotfiles/folders and file types Obsidian can't render; mirrors Obsidian's global setting (Files & Links); off by default |
+| Email notifications | Email your mailbox when a todo is added or the unfinished-todo check fires (Web3Forms); off by default |
 | Image storage folder | Defaults to `attachments` |
 | Image rendering enhancements | On by default |
 | Max image height | Percentage of viewport; 0 = unlimited; 70% by default |

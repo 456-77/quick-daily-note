@@ -28,6 +28,7 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 - Optionally save pasted images into a configurable folder (vault-relative path; empty = vault root) and insert the link at the cursor (off by default).
 - **File explorer copy/paste** — with a file or folder selected in the sidebar file explorer, `Ctrl/Cmd+C` / `Ctrl/Cmd+X` copy or cut it (folders included, copied recursively), and `Ctrl/Cmd+V` pastes it into the selected folder, or the folder of the selected file — even while that file is open — (duplicates get a numbered suffix); files copied from the system file manager can be pasted into the vault the same way. Copying/pasting text in the editor keeps its native behavior. Toggleable in settings.
 - **Code block delete** — a delete button next to the native copy button on rendered code blocks (reading view & live preview) removes the whole block from the note.
+- **Sync-ready storage** — plugin settings and todo data are saved to a single file `.quick-daily-note.json` in the vault root, so they sync across devices with vault sync tools (e.g. Remotely Save); legacy `data.json` config is auto-migrated on first load, and changes synced in from another device reload automatically.
 
 ### 🖼️ Image Enhancements
 - Images fit the note width automatically; overly tall images are height-limited.

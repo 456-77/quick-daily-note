@@ -414,10 +414,69 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.destroyBgVideo();
   }
 
+  /** 库内状态文件路径：配置与待办数据保存在库根目录，随仓库一起同步（如 Remotely Save） */
+  private readonly stateFilePath = ".quick-daily-note.json";
+
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<QuickDailyNoteSettings>);
+    const vaultState = await this.readVaultState();
+    if (vaultState) {
+      // 库内文件优先（跨设备同步的唯一数据源）
+      this.settings = Object.assign({}, DEFAULT_SETTINGS, vaultState);
+    } else {
+      // 旧版 data.json 兜底并迁移到库内文件
+      this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<QuickDailyNoteSettings>);
+      await this.writeVaultState();
+    }
     // 隐藏文件开关以 Obsidian 全局配置为准（插件开关是全局设置的镜像）
     this.settings.showHiddenFiles = !!this.vaultConfig().getConfig("showHiddenFiles");
+    // 监听库内状态文件变化：其他设备经同步写入后自动重载
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (file.path === this.stateFilePath) void this.reloadFromVaultState();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        if (file.path === this.stateFilePath) void this.reloadFromVaultState();
+      })
+    );
+  }
+
+  /** 从库内状态文件读取配置与数据，文件不存在或损坏时返回 null */
+  private async readVaultState(): Promise<Partial<QuickDailyNoteSettings> | null> {
+    try {
+      const file = this.app.vault.getAbstractFileByPath(this.stateFilePath);
+      if (!(file instanceof TFile)) return null;
+      const raw = await this.app.vault.read(file);
+      const parsed: unknown = JSON.parse(raw);
+      return typeof parsed === "object" && parsed !== null ? parsed : null;
+    } catch (err) {
+      console.warn("Quick Daily Note: 读取库内状态文件失败", err);
+      return null;
+    }
+  }
+
+  /** 把配置与数据写入库内状态文件（不存在则创建） */
+  private async writeVaultState(): Promise<void> {
+    try {
+      const existing = this.app.vault.getAbstractFileByPath(this.stateFilePath);
+      if (existing instanceof TFile) {
+        await this.app.vault.modify(existing, JSON.stringify(this.settings, null, 2));
+      } else {
+        await this.app.vault.create(this.stateFilePath, JSON.stringify(this.settings, null, 2));
+      }
+    } catch (err) {
+      console.warn("Quick Daily Note: 写入库内状态文件失败", err);
+    }
+  }
+
+  /** 状态文件被外部（同步）更新后重载配置并刷新界面 */
+  private async reloadFromVaultState(): Promise<void> {
+    const vaultState = await this.readVaultState();
+    if (!vaultState) return;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, vaultState);
+    this.settings.showHiddenFiles = !!this.vaultConfig().getConfig("showHiddenFiles");
+    this.refreshViews();
   }
 
   /** Vault 全局配置读写（obsidian typings 未声明 getConfig/setConfig，运行时可用） */
@@ -429,7 +488,7 @@ export default class QuickDailyNotePlugin extends Plugin {
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    await this.writeVaultState();
   }
 
   /** 是否已注册"设置标题等级"命令 */
@@ -3714,6 +3773,11 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
+
+    new Setting(containerEl)
+      .setName("配置与数据存储")
+      .setDesc("插件配置与待办数据保存在库根目录的 .quick-daily-note.json 文件中，随仓库一起同步（如 Remotely Save）。换设备安装插件并同步后无需重新设置；旧版 data.json 配置会在首次加载时自动迁移。")
+      .setHeading();
 
     new Setting(containerEl).setName("快捷日记设置").setHeading();
 

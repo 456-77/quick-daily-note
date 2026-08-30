@@ -1044,14 +1044,33 @@ body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header:not(.is-
   padding: 1px 8px;
 }
 .qdn-day-note {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   padding: 3px 8px;
   border-radius: 4px;
   font-size: 13px;
   color: var(--text-normal);
   cursor: pointer;
+}
+.qdn-day-note-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.qdn-day-note-actions {
+  display: none;
+  gap: 2px;
+}
+.qdn-day-note:hover .qdn-day-note-actions {
+  display: flex;
+}
+.qdn-day-note-btn {
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 5px;
 }
 .qdn-day-note:hover {
   background: var(--background-modifier-hover);

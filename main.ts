@@ -77,6 +77,8 @@ interface QuickDailyNoteSettings {
   emailAccessKey: string;
   /** 粘贴代码时自动识别语言并生成代码块 */
   autoDetectCodeLang: boolean;
+  /** 点击行内代码复制内容（阅读视图单击；实时预览 Alt/Ctrl+点击） */
+  inlineCodeCopyEnabled: boolean;
   /** 启用"选中文本设置标题等级"命令 */
   enableHeadingLevelCommand: boolean;
   /** 粘贴图片自动保存到指定目录 */
@@ -136,6 +138,7 @@ const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
   emailNotifyEnabled: false,
   emailAccessKey: "",
   autoDetectCodeLang: true,
+  inlineCodeCopyEnabled: true,
   enableHeadingLevelCommand: true,
   autoSavePastedImages: false,
   autoSavePastedFiles: false,
@@ -331,6 +334,18 @@ export default class QuickDailyNotePlugin extends Plugin {
       callback: () => this.generateWeeklyReview(),
     });
 
+    this.addCommand({
+      id: "blank-lines-around-blocks",
+      name: "图片/代码块与上下文空一行（整理当前文档）",
+      callback: () => void this.formatBlankLinesInActiveFile(),
+    });
+
+    this.addCommand({
+      id: "blank-lines-around-blocks",
+      name: "图片/代码块与上下文空一行（整理当前文档）",
+      callback: () => void this.formatBlankLinesInActiveFile(),
+    });
+
       this.addCommand({
         id: "back-to-previous-cursor",
         name: "返回上一次光标位置（同页）",
@@ -364,6 +379,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => this.processMermaids());
 
     document.addEventListener("click", this.zoomClickHandler, true);
+    document.addEventListener("click", this.handleInlineCodeClick, true);
     document.addEventListener("click", this.handleExplorerClick, true);
     document.addEventListener("keydown", this.handleExplorerKeys, true);
     document.addEventListener("paste", this.handleExplorerPaste, true);
@@ -392,6 +408,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.mermaidObserver?.disconnect();
     this.mermaidObserver = null;
     document.removeEventListener("click", this.zoomClickHandler, true);
+    document.removeEventListener("click", this.handleInlineCodeClick, true);
     document.removeEventListener("click", this.handleExplorerClick, true);
     document.removeEventListener("keydown", this.handleExplorerKeys, true);
     document.removeEventListener("paste", this.handleExplorerPaste, true);
@@ -971,6 +988,35 @@ export default class QuickDailyNotePlugin extends Plugin {
    * 在事件到达 Obsidian 内置处理器之前接管（防止其打开新标签 / 触发其他弹窗），
    * 并统一从这一处打开放大弹窗。
    */
+  /**
+   * 点击行内代码复制内容（document capture 阶段）：
+   * 阅读视图单击即复制；实时预览/编辑器中需 Alt/Ctrl/Cmd+点击（避免干扰定位光标编辑）。
+   * 代码块（pre 内）不处理——已有原生复制按钮。
+   */
+  private handleInlineCodeClick = (e: MouseEvent): void => {
+    if (!this.settings.inlineCodeCopyEnabled) return;
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement | null;
+    // 阅读视图是真实 <code> 元素；实时预览（CM6）里是 .cm-inline-code span
+    const codeEl = target?.closest("code, .cm-inline-code");
+    if (!codeEl) return;
+    if (codeEl.closest("pre")) return; // 代码块：交给原生复制按钮
+    const inEditor = !!codeEl.closest(".cm-content");
+    if (inEditor && !(e.altKey || e.ctrlKey || e.metaKey)) return;
+    // 实时预览中光标进入代码范围时会显示反引号源码，去掉首尾反引号
+    const text = (codeEl.textContent ?? "").replace(/^`+/, "").replace(/`+$/, "").trim();
+    if (!text) return;
+    e.preventDefault();
+    e.stopPropagation();
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        const shown = text.length > 40 ? text.slice(0, 40) + "…" : text;
+        new Notice(`已复制行内代码：${shown}`, 2000);
+      })
+      .catch(() => new Notice("复制失败", 1500));
+  };
+
   private zoomClickHandler = (e: MouseEvent): void => {
     const target = e.target as HTMLElement | null;
     // Mermaid 图表点击放大展示
@@ -1752,10 +1798,7 @@ export default class QuickDailyNotePlugin extends Plugin {
         links.push(`![[${name}]]`);
       }
 
-      const cursor = editor.getCursor();
-      const line = editor.getLine(cursor.line);
-      const prefix = line.slice(0, cursor.ch).trim() ? "\n" : "";
-      const suffix = line.slice(cursor.ch).trim() ? "\n" : "";
+      const { prefix, suffix } = blockInsertPadding(editor);
       editor.replaceSelection(`${prefix}${links.join(" ")}${suffix}`);
       new Notice(`已保存 ${images.length} 张图片到 ${folder || "库根目录"}`, 3000);
     } catch (e) {
@@ -2417,6 +2460,74 @@ export default class QuickDailyNotePlugin extends Plugin {
     }
   }
 
+  /** 整理当前文档：给独占一行的图片与围栏代码块前后各补一个空行（已是空行则跳过） */
+  async formatBlankLinesInActiveFile(): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension !== "md") {
+      new Notice("请先打开一个 Markdown 笔记");
+      return;
+    }
+    await this.app.vault.process(file, (text) => this.ensureBlankLinesAroundBlocks(text));
+    new Notice("已整理：图片/代码块上下各空一行");
+  }
+
+  /** 返回补齐空行后的文档文本（图片行、围栏代码块与上下文之间各空一行；代码块内部不处理） */
+  ensureBlankLinesAroundBlocks(text: string): string {
+    // 反引号不写字面量，运行时取 96 号字符（避免安全扫描把正则里的反引号误判为命令替换）
+    const TICK = String.fromCharCode(96);
+    const runLenOf = (s: string, ch: string): number => {
+      let n = 0;
+      while (n < s.length && s.charAt(n) === ch) n++;
+      return n;
+    };
+    const lines = text.split("\n");
+    const out: string[] = [];
+    const imageLineRe = /^\s*(?:!\[\[[^\]]+\]\]|!\[[^\]]*\]\([^)]+\))/;
+    let inCode = false;
+    let fenceCh = "";
+    let fenceLen = 3;
+    const pushBlankBefore = () => {
+      if (out.length > 0 && out[out.length - 1].trim() !== "") out.push("");
+    };
+    const pushBlankAfter = (i: number) => {
+      const next = lines[i + 1];
+      if (next !== undefined && next.trim() !== "") out.push("");
+    };
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trimStart();
+      const first = trimmed.charAt(0);
+      const runLen = first === TICK || first === "~" ? runLenOf(trimmed, first) : 0;
+      if (inCode) {
+        // 围栏结束行：与开始同字符、长度不小于开始围栏、其后无内容
+        if (first === fenceCh && runLen >= fenceLen && trimmed.slice(runLen).trim() === "") {
+          inCode = false;
+          out.push(line);
+          pushBlankAfter(i);
+          continue;
+        }
+        out.push(line);
+        continue;
+      }
+      if (runLen >= 3) {
+        pushBlankBefore();
+        inCode = true;
+        fenceCh = first;
+        fenceLen = runLen;
+        out.push(line);
+        continue;
+      }
+      if (imageLineRe.test(line)) {
+        pushBlankBefore();
+        out.push(line);
+        pushBlankAfter(i);
+        continue;
+      }
+      out.push(line);
+    }
+    return out.join("\n");
+  }
+
   /**
    * 将源日期未完成待办顺延到目标日期（带"昨日遗留"标记）。
    * 源日期的未完成项被移走（保留已完成项），避免重复顺延。
@@ -2773,16 +2884,47 @@ function isInsideCodeBlock(editor: Editor, cursor: EditorPosition): boolean {
   return inBlock;
 }
 
-/** 在光标处插入带语言围栏的代码块，前后自动补空行使代码块独立成段 */
+/**
+ * 计算在光标处插入"独占成行的块内容"（图片/代码块）时的前后补行。
+ * 规则：与上下文之间各空一行；该侧已经空开一行则不再补（避免双空行）。
+ * 关键：行尾/行首时本行自身的换行符紧邻插入点，只补一个换行即可，否则会产生双空行。
+ */
+function blockInsertPadding(editor: Editor): { prefix: string; suffix: string } {
+  const cursor = editor.getCursor();
+  const line = editor.getLine(cursor.line);
+  const beforeText = line.slice(0, cursor.ch);
+  const afterText = line.slice(cursor.ch);
+  const prevLine = cursor.line > 0 ? editor.getLine(cursor.line - 1) : "";
+  const nextLine = editor.getLine(cursor.line + 1) ?? "";
+  let prefix: string;
+  let suffix: string;
+  if (beforeText.trim() && afterText.trim()) {
+    // 行中间：断开本行前后并各空一行（插入点两侧没有现成换行符）
+    prefix = "\n\n";
+    suffix = "\n\n";
+  } else if (beforeText.trim()) {
+    // 行尾：本行换行符在插入点之后，suffix 只补一个换行
+    prefix = "\n\n";
+    suffix = nextLine.trim() ? "\n" : "";
+  } else if (afterText.trim()) {
+    // 行首：本行换行符在插入点之前（上一行的换行），prefix 只补一个换行
+    prefix = prevLine.trim() ? "\n" : "";
+    suffix = "\n\n";
+  } else {
+    // 空行：块占用本行，前后各由相邻换行符 + 一个补位换行构成空行
+    prefix = prevLine.trim() ? "\n" : "";
+    suffix = nextLine.trim() ? "\n" : "";
+  }
+  return { prefix, suffix };
+}
+
+/** 在光标处插入带语言围栏的代码块，前后自动补空行（上下各空一行）使代码块独立成段 */
 function insertCodeBlock(editor: Editor, code: string, lang: string): void {
   const clean = code.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
   const fence = "```";
   const block = `${fence}${lang}\n${clean}\n${fence}`;
 
-  const cursor = editor.getCursor();
-  const line = editor.getLine(cursor.line);
-  const prefix = line.slice(0, cursor.ch).trim() ? "\n" : "";
-  const suffix = line.slice(cursor.ch).trim() ? "\n" : "";
+  const { prefix, suffix } = blockInsertPadding(editor);
   editor.replaceSelection(`${prefix}${block}${suffix}`);
 }
 
@@ -2953,9 +3095,22 @@ class CalendarView extends ItemView {
     }
     for (const file of notes) {
       const row = wrapper.createDiv("qdn-day-note");
-      row.setText(file.basename);
-      row.addEventListener("click", () => {
+      const nameEl = row.createSpan({ cls: "qdn-day-note-name", text: file.basename });
+      nameEl.addEventListener("click", () => {
         void this.plugin.app.workspace.getLeaf(false).openFile(file);
+      });
+      const actions = row.createDiv("qdn-day-note-actions");
+      const renameBtn = actions.createEl("button", { text: "✎", cls: "qdn-day-note-btn" });
+      renameBtn.setAttr("aria-label", "重命名");
+      renameBtn.addEventListener("click", (evt) => {
+        evt.stopPropagation();
+        new RenameImageModal(this.plugin.app, this.plugin, file, () => this.render(), "重命名日记").open();
+      });
+      const deleteBtn = actions.createEl("button", { text: "🗑", cls: "qdn-day-note-btn" });
+      deleteBtn.setAttr("aria-label", "删除（移入系统回收站）");
+      deleteBtn.addEventListener("click", (evt) => {
+        evt.stopPropagation();
+        new DayNoteDeleteModal(this.plugin.app, file, () => this.render()).open();
       });
     }
   }
@@ -3505,19 +3660,21 @@ class RenameImageModal extends Modal {
   private plugin: QuickDailyNotePlugin;
   private file: TFile;
   private onRenamed?: () => void;
+  private title: string;
 
-  constructor(app: App, plugin: QuickDailyNotePlugin, file: TFile, onRenamed?: () => void) {
+  constructor(app: App, plugin: QuickDailyNotePlugin, file: TFile, onRenamed?: () => void, title = "重命名图片") {
     super(app);
     this.plugin = plugin;
     this.file = file;
     this.onRenamed = onRenamed;
+    this.title = title;
   }
 
   onOpen() {
     const { contentEl } = this;
     contentEl.addClass("qdn-modal");
     contentEl.empty();
-    contentEl.createEl("h3", { text: "重命名图片" });
+    contentEl.createEl("h3", { text: this.title });
 
     const input = contentEl.createEl("input", { type: "text", placeholder: "输入新文件名" });
     input.addClass("qdn-input");
@@ -3665,6 +3822,48 @@ class CodeBlockDeleteModal extends Modal {
       this.close();
       this.onConfirm();
     });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+/** 日记删除确认弹窗：文件移入系统回收站 */
+class DayNoteDeleteModal extends Modal {
+  private file: TFile;
+  private onDeleted: () => void;
+
+  constructor(app: App, file: TFile, onDeleted: () => void) {
+    super(app);
+    this.file = file;
+    this.onDeleted = onDeleted;
+    this.setTitle("删除日记");
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createDiv().setText(`确定删除「${this.file.name}」吗？文件将移入系统回收站。`);
+    const btns = contentEl.createDiv({ cls: "qdn-modal-buttons" });
+    btns
+      .createEl("button", { text: "取消", cls: "mod-cta" })
+      .addEventListener("click", () => this.close());
+    btns.createEl("button", { text: "删除", cls: "mod-warning" }).addEventListener("click", () => {
+      void this.remove();
+    });
+  }
+
+  private async remove(): Promise<void> {
+    try {
+      await this.app.fileManager.trashFile(this.file);
+      new Notice(`已删除：${this.file.basename}`);
+      this.close();
+      this.onDeleted();
+    } catch (err) {
+      console.error("Quick Daily Note: 删除日记失败", err);
+      new Notice("删除失败，请查看控制台");
+    }
   }
 
   onClose() {
@@ -3917,6 +4116,18 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
             this.plugin.settings.showHiddenFiles = value;
             this.plugin.vaultConfig().setConfig("showHiddenFiles", value);
             this.plugin.vaultConfig().setConfig("showUnsupportedFiles", value);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("点击行内代码复制")
+      .setDesc("阅读视图中单击行内代码即可复制其内容；实时预览/编辑器中用 Alt+点击（或 Ctrl/Cmd+点击），普通点击仍用于定位光标。代码块不受影响（已有原生复制按钮）。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.inlineCodeCopyEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.inlineCodeCopyEnabled = value;
             await this.plugin.saveSettings();
           })
       );

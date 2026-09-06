@@ -299,7 +299,13 @@ export default class QuickDailyNotePlugin extends Plugin {
   private printStyles: Map<HTMLElement, { css: string; overflow: string }> | null = null;
   /** 代码块删除按钮（浮动层，阅读视图与实时预览统一方案） */
   private codeDeleteBtn: HTMLElement | null = null;
-  private activeDeleteTarget: HTMLElement | null = null;
+  private activeDeleteTarget: {
+    filePath: string;
+    /** 围栏起始行（0 基）；-1 表示未知，删除时走内容匹配 */
+    startLine: number;
+    /** 代码块内容文本（内容匹配兜底用） */
+    contentText: string;
+  } | null = null;
   /** 同页光标历史：文件路径 -> 快照栈 */
     private cursorHistory = new Map<string, CursorSnapshot[]>();
     /** 各文件最近一次记录的光标，用于识别大幅跳转 */
@@ -440,18 +446,44 @@ export default class QuickDailyNotePlugin extends Plugin {
   /** 旧点前缀状态文件（2.4.9 曾用 .quick-daily-note.json），仅作为迁移来源，加载后清理 */
   private readonly legacyStateFilePath = ".quick-daily-note.json";
 
+  /**
+   * 每设备独立的设置键（不随库同步）：背景图片相关设置各设备可不同，
+   * 存放在插件本地 data.json（.obsidian/plugins/ 下，Remotely Save 默认跳过 .obsidian）。
+   */
+  private static readonly DEVICE_LOCAL_KEYS = [
+    "bgEnabled",
+    "bgImagePath",
+    "bgOpacity",
+    "bgBlur",
+    "bgBrightness",
+    "bgContrast",
+    "bgPosX",
+    "bgPosY",
+    "bgScale",
+    "bgFit",
+  ] as const satisfies readonly (keyof QuickDailyNoteSettings)[];
+
   async loadSettings() {
     const vaultState = await this.readVaultState();
+    const local = (await this.loadData()) as
+      | (Partial<QuickDailyNoteSettings> & { bgLocalVersion?: number })
+      | null;
     if (vaultState) {
       // 库内文件优先（跨设备同步的唯一数据源）
       this.settings = Object.assign({}, DEFAULT_SETTINGS, vaultState);
     } else {
       // 旧版 data.json 兜底
-      this.settings = Object.assign({}, DEFAULT_SETTINGS, (await this.loadData()) as Partial<QuickDailyNoteSettings>);
+      this.settings = Object.assign({}, DEFAULT_SETTINGS, local);
     }
-    // 无论数据来源，都确保写入新路径，并清理旧点前缀文件
+    if (local && local.bgLocalVersion === 1) {
+      // 本地 data.json 已是背景设置权威（此前已完成迁移）：覆盖同步值
+      this.applyLocalBackgroundOverrides(local);
+    }
+    // 无论数据来源，都确保写入新路径（剥离背景键），并清理旧点前缀文件；
+    // 首次迁移时以当前背景值播种本地 data.json 并打标（此后本地为权威，各设备独立）
     await this.writeVaultState();
     await this.removeLegacyStateFile();
+    await this.saveLocalBackgroundSettings();
     // 隐藏文件开关以 Obsidian 全局配置为准（插件开关是全局设置的镜像）
     this.settings.showHiddenFiles = !!this.vaultConfig().getConfig("showHiddenFiles");
     // 监听库内状态文件变化：其他设备经同步写入后自动重载
@@ -467,13 +499,36 @@ export default class QuickDailyNotePlugin extends Plugin {
     );
   }
 
-  /** 从库内状态文件读取配置与数据（优先新路径，其次旧点前缀文件），都不存在或损坏时返回 null */
+  /** 用本地 data.json 中的背景键覆盖当前设置（同步文件中的 bg 键一律忽略） */
+  private applyLocalBackgroundOverrides(local: Partial<QuickDailyNoteSettings> | null): void {
+    if (!local) return;
+    const record = this.settings as unknown as Record<string, unknown>;
+    for (const key of QuickDailyNotePlugin.DEVICE_LOCAL_KEYS) {
+      if (local[key] !== undefined) {
+        record[key] = local[key];
+      }
+    }
+  }
+
+  /** 把背景设置写入本地 data.json（每设备独立，不随库同步；bgLocalVersion 标记迁移完成） */
+  private async saveLocalBackgroundSettings(): Promise<void> {
+    const local: Record<string, unknown> = { bgLocalVersion: 1 };
+    for (const key of QuickDailyNotePlugin.DEVICE_LOCAL_KEYS) {
+      local[key] = this.settings[key];
+    }
+    await this.saveData(local);
+  }
+
+  /**
+   * 从库内状态文件读取配置与数据（优先新路径，其次旧点前缀文件），都不存在或损坏时返回 null。
+   * 必须用 adapter 直读：库内 json 不在 Obsidian 索引中（"检测所有文件扩展名"关闭时
+   * getAbstractFileByPath 返回 null），基于索引的读取会误判文件不存在。
+   */
   private async readVaultState(): Promise<Partial<QuickDailyNoteSettings> | null> {
     for (const path of [this.stateFilePath, this.legacyStateFilePath]) {
       try {
-        const file = this.app.vault.getAbstractFileByPath(path);
-        if (!(file instanceof TFile)) continue;
-        const raw = await this.app.vault.read(file);
+        if (!(await this.app.vault.adapter.exists(path))) continue;
+        const raw = await this.app.vault.adapter.read(path);
         const parsed: unknown = JSON.parse(raw);
         if (typeof parsed === "object" && parsed !== null) return parsed;
       } catch (err) {
@@ -483,37 +538,41 @@ export default class QuickDailyNotePlugin extends Plugin {
     return null;
   }
 
-  /** 把配置与数据写入库内状态文件（不存在则创建） */
+  /** 把配置写入库内状态文件（不存在则创建）；背景设置每设备独立，写入前剥离。
+   *  用 adapter.write（upsert，不依赖文件索引），原因同 readVaultState */
   private async writeVaultState(): Promise<void> {
+    const shared: Record<string, unknown> = { ...this.settings };
+    for (const key of QuickDailyNotePlugin.DEVICE_LOCAL_KEYS) {
+      delete shared[key];
+    }
     try {
-      const existing = this.app.vault.getAbstractFileByPath(this.stateFilePath);
-      if (existing instanceof TFile) {
-        await this.app.vault.modify(existing, JSON.stringify(this.settings, null, 2));
-      } else {
-        await this.app.vault.create(this.stateFilePath, JSON.stringify(this.settings, null, 2));
-      }
+      await this.app.vault.adapter.write(this.stateFilePath, JSON.stringify(shared, null, 2));
     } catch (err) {
       console.warn("Quick Daily Note: 写入库内状态文件失败", err);
     }
   }
 
-  /** 状态文件被外部（同步）更新后重载配置并刷新界面 */
+  /** 状态文件被外部（同步）更新后重载配置并刷新界面；背景设置保留本机值 */
   private async reloadFromVaultState(): Promise<void> {
     const vaultState = await this.readVaultState();
     if (!vaultState) return;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, vaultState);
+    const local = (await this.loadData()) as
+      | (Partial<QuickDailyNoteSettings> & { bgLocalVersion?: number })
+      | null;
+    if (local && local.bgLocalVersion === 1) {
+      this.applyLocalBackgroundOverrides(local);
+    }
     this.settings.showHiddenFiles = !!this.vaultConfig().getConfig("showHiddenFiles");
     this.refreshViews();
   }
 
-  /** 清理旧点前缀状态文件（确认新文件已写入后才删除，避免丢数据） */
+  /** 清理旧点前缀状态文件（确认新文件已写入后才删除，避免丢数据）；同样走 adapter 不依赖索引 */
   private async removeLegacyStateFile(): Promise<void> {
     try {
-      const current = this.app.vault.getAbstractFileByPath(this.stateFilePath);
-      if (!(current instanceof TFile)) return;
-      const legacy = this.app.vault.getAbstractFileByPath(this.legacyStateFilePath);
-      if (legacy instanceof TFile) {
-        await this.app.vault.delete(legacy);
+      if (!(await this.app.vault.adapter.exists(this.legacyStateFilePath))) return;
+      if (await this.app.vault.adapter.exists(this.stateFilePath)) {
+        await this.app.vault.adapter.remove(this.legacyStateFilePath);
       }
     } catch (err) {
       console.warn("Quick Daily Note: 清理旧状态文件失败", err);
@@ -529,7 +588,9 @@ export default class QuickDailyNotePlugin extends Plugin {
   }
 
   async saveSettings() {
+    // 共享配置写库内同步文件；背景设置每设备独立，写本地 data.json
     await this.writeVaultState();
+    await this.saveLocalBackgroundSettings();
   }
 
   /** 是否已注册"设置标题等级"命令 */
@@ -613,6 +674,73 @@ export default class QuickDailyNotePlugin extends Plugin {
     }
   };
 
+  /** CM6 EditorView 最小形状（obsidian typings 未暴露 editor.cm，运行时可用） */
+  private cmViewOf(view: MarkdownView): {
+    posAtDOM(node: Node): number;
+    state: { doc: { lineAt(pos: number): { number: number }; toString(): string } };
+  } | null {
+    return (view.editor as unknown as { cm?: { posAtDOM(node: Node): number; state: { doc: { lineAt(pos: number): { number: number }; toString(): string } } } }).cm ?? null;
+  }
+
+  /**
+   * 悬停时捕获删除目标（此时元素仍挂在 DOM 上，可定位文件与行号）。
+   * 点击确认时编辑器可能已重渲染导致原元素脱离 DOM，因此不能用元素本身回查。
+   */
+  private captureCodeBlockTarget(el: HTMLElement): { filePath: string; startLine: number; contentText: string } | null {
+    const view = this.findMarkdownView(el);
+    const file = view?.file;
+    if (!view || !file) return null;
+
+    // 阅读视图：pre 文本走内容匹配（pre[data-line] 是分区内相对行号，不可靠）
+    const pre = el.closest("pre");
+    if (pre) {
+      const contentText = (pre.textContent ?? "").replace(/\u200b/g, "").trim();
+      return { filePath: file.path, startLine: -1, contentText };
+    }
+
+    // 实时预览：用 CM6 posAtDOM 从元素反查文档行，向上找包围它的围栏块
+    const cm = this.cmViewOf(view);
+    if (cm) {
+      try {
+        const pos = cm.posAtDOM(el);
+        const line0 = cm.state.doc.lineAt(pos).number - 1; // 0 基
+        const lines = cm.state.doc.toString().split("\n");
+        let start = -1;
+        for (let i = Math.min(line0, lines.length - 1); i >= 0; i--) {
+          if (/^\s*(```|~~~)/.test(lines[i])) {
+            start = i;
+            break;
+          }
+        }
+        if (start >= 0) {
+          let end = -1;
+          for (let j = start + 1; j < lines.length; j++) {
+            if (/^\s*(```|~~~)/.test(lines[j])) {
+              end = j;
+              break;
+            }
+          }
+          if (end > start && line0 <= end) {
+            const contentText = lines.slice(start + 1, end).join("\n").trim();
+            return { filePath: file.path, startLine: start, contentText };
+          }
+        }
+      } catch (err) {
+        console.warn("Quick Daily Note: 代码块定位失败", err);
+      }
+    }
+
+    // 兜底：旧方案 data-line（部分版本可用）
+    const lineEl = el.closest(".cm-line[data-line]");
+    if (lineEl) {
+      const n = parseInt(lineEl.getAttribute("data-line") ?? "", 10);
+      if (!Number.isNaN(n) && n >= 0) {
+        return { filePath: file.path, startLine: n, contentText: "" };
+      }
+    }
+    return null;
+  }
+
   /**
    * 若代码块 pre 存在 ::before 语言标签（阅读视图最靠左的原生元素），
    * 把删除按钮锚定到其左侧并返回 true；否则返回 false。
@@ -643,14 +771,16 @@ export default class QuickDailyNotePlugin extends Plugin {
     };
   }
 
-  /** 在指定视口坐标显示删除按钮 */
+  /** 在指定视口坐标显示删除按钮（同时捕获删除目标定位信息） */
   private showCodeDeleteBtnAt(left: number, top: number, deleteTarget: HTMLElement): void {
     this.ensureCodeDeleteBtn();
     if (!this.codeDeleteBtn) return;
+    const captured = this.captureCodeBlockTarget(deleteTarget);
+    if (!captured) return; // 无法定位所属笔记（元素已脱离 DOM 等），不显示按钮
     this.codeDeleteBtn.style.left = `${Math.max(left, 4)}px`;
     this.codeDeleteBtn.style.top = `${Math.max(top, 40)}px`;
     this.codeDeleteBtn.addClass("qdn-show");
-    this.activeDeleteTarget = deleteTarget;
+    this.activeDeleteTarget = captured;
   }
 
   /**
@@ -697,10 +827,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     btn.addEventListener("click", () => {
       const target = this.activeDeleteTarget;
       if (!target) return;
-      const onConfirm = target.classList.contains("code-block-flair")
-        ? () => void this.deleteBlockByFlair(target)
-        : () => void this.deleteCodeBlock(target);
-      this.openCodeBlockDeleteModal(onConfirm);
+      this.openCodeBlockDeleteModal(() => void this.deleteCapturedCodeBlock(target));
     });
     // 点击按钮以外的任意位置或滚动页面时隐藏
     document.addEventListener("mousedown", this.hideOnOutsideClick, true);
@@ -709,51 +836,40 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.codeDeleteBtn = btn;
   }
 
-  /** 实时预览：按 flair 定位代码块并删除 */
-  private async deleteBlockByFlair(flair: HTMLElement) {
-    const view = this.findMarkdownView(flair);
-    const file = view?.file;
-    if (!file) return;
-    // 优先取所在行的 data-line（代码块首行即围栏行）
-    const lineEl = flair.closest(".cm-line[data-line]");
-    const attrLine = lineEl ? parseInt(lineEl.getAttribute("data-line") ?? "", 10) : -1;
-    if (!Number.isNaN(attrLine) && attrLine >= 0) {
-      await this.deleteCodeBlockAtLine(file, attrLine);
-      return;
-    }
-    // 兜底：若仍存在 pre（部分版本），走内容匹配
-    const pre = flair.closest("pre");
-    if (pre) {
-      await this.deleteCodeBlock(pre);
-      return;
-    }
-    new Notice("无法定位代码块，未删除");
-  }
-
   /** 删除代码块确认弹窗 */
   openCodeBlockDeleteModal(onConfirm: () => void) {
     new CodeBlockDeleteModal(this.app, onConfirm).open();
   }
 
-  /** 删除代码块（阅读视图：由 pre 的 data-line 或内容匹配定位） */
-  private async deleteCodeBlock(pre: HTMLElement) {
-    const view = this.findMarkdownView(pre);
-    const file = view?.file;
-    if (!file) return;
+  /**
+   * 删除已捕获的代码块：优先用悬停时记录的围栏行号（删除前校验该行确为围栏），
+   * 无效时按捕获的内容文本匹配源码中的围栏块。
+   */
+  private async deleteCapturedCodeBlock(target: {
+    filePath: string;
+    startLine: number;
+    contentText: string;
+  }) {
+    const file = this.app.vault.getAbstractFileByPath(target.filePath);
+    if (!(file instanceof TFile)) {
+      new Notice("源笔记不存在或已被移动");
+      return;
+    }
     const content = await this.app.vault.read(file);
     const lines = content.split("\n");
-    const lineAttr = pre.getAttribute("data-line");
-    const attrLine = lineAttr !== null ? parseInt(lineAttr, 10) : -1;
-    let startLine =
-      !Number.isNaN(attrLine) && /^\s*(```|~~~)/.test(lines[attrLine] ?? "") ? attrLine : -1;
-    if (startLine < 0) {
-      startLine = this.findCodeBlockByContent(lines, pre.textContent ?? "");
-      if (startLine < 0) {
-        new Notice("无法定位代码块，未删除");
-        return;
-      }
+    if (
+      target.startLine >= 0 &&
+      /^\s*(```|~~~)/.test(lines[target.startLine] ?? "")
+    ) {
+      await this.deleteCodeBlockAtLine(file, target.startLine);
+      return;
     }
-    await this.deleteCodeBlockAtLine(file, startLine);
+    const start = this.findCodeBlockByContent(lines, target.contentText);
+    if (start < 0) {
+      new Notice("无法定位代码块，未删除");
+      return;
+    }
+    await this.deleteCodeBlockAtLine(file, start);
   }
 
   /** 按起始行删除代码块（从起始围栏到结束围栏） */
@@ -782,9 +898,10 @@ export default class QuickDailyNotePlugin extends Plugin {
     }
   }
 
-  /** 按代码块内容匹配源码中的围栏块起始行（存在多个相同块时返回 -1） */
+  /** 按代码块内容匹配源码中的围栏块起始行（忽略空白差异；存在多个相同块时返回 -1） */
   private findCodeBlockByContent(lines: string[], preText: string): number {
-    const target = preText.trim();
+    // 实时预览 DOM 的 textContent 不含换行（各 cm-line 文本直接拼接），统一去掉所有空白再比较
+    const target = preText.replace(/\s+/g, "");
     if (!target) return -1;
     let found = -1;
     let i = 0;
@@ -793,7 +910,7 @@ export default class QuickDailyNotePlugin extends Plugin {
         const start = i;
         let j = i + 1;
         while (j < lines.length && !/^\s*(```|~~~)/.test(lines[j])) j++;
-        const blockContent = lines.slice(start + 1, j).join("\n").trim();
+        const blockContent = lines.slice(start + 1, j).join("\n").replace(/\s+/g, "");
         if (blockContent === target) {
           if (found !== -1) return -1;
           found = start;
@@ -806,11 +923,12 @@ export default class QuickDailyNotePlugin extends Plugin {
     return found;
   }
 
-  /** 定位包含指定元素的 Markdown 视图 */
+  /** 定位包含指定元素的 Markdown 视图（跳过未加载的延迟标签页：其 view/contentEl 可能未构建） */
   findMarkdownView(el: HTMLElement): MarkdownView | null {
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-      const view = leaf.view as ItemView;
-      if (view.getViewType() === "markdown" && view.contentEl.contains(el)) {
+      const view = leaf.view as ItemView | undefined;
+      if (!view) continue;
+      if (view.getViewType() === "markdown" && view.contentEl?.contains(el)) {
         return view as MarkdownView;
       }
     }
@@ -965,7 +1083,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     else img.addEventListener("load", apply);
   }
 
-  /** 悬浮工具栏：裁剪 / 放大 / 复制 / 重命名 / 删除；点击图片直接放大 */
+  /** 悬浮工具栏：裁剪 / 复制 / 重命名 / 删除；点击图片直接放大（原生编辑块也有放大按钮，工具栏不再重复） */
   private buildImageToolbar(wrap: HTMLElement, img: HTMLImageElement): void {
     const bar = wrap.createDiv("qdn-img-toolbar");
     const mk = (text: string, title: string, fn: () => void) => {
@@ -977,7 +1095,6 @@ export default class QuickDailyNotePlugin extends Plugin {
         });
     };
     mk("✂", "裁剪", () => this.openCropModal(img));
-    mk("⛶", "放大", () => this.openZoomModal(img));
     mk("⧉", "复制", () => void this.copyImage(img));
     mk("✎", "重命名", () => this.openRenameModal(img));
     mk("🗑", "删除", () => this.openDeleteModal(img));
@@ -3999,7 +4116,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("配置与数据存储")
-      .setDesc("插件配置与待办数据保存在库根目录的 quick-daily-note.json 文件中，随仓库一起同步（如 Remotely Save）。换设备安装插件并同步后无需重新设置；旧版 data.json 与 .quick-daily-note.json 配置会在首次加载时自动迁移。注意该文件会显示在文件管理器中（点开头的文件名 Remotely Save 不会同步）。")
+      .setDesc("插件配置与待办数据保存在库根目录的 quick-daily-note.json 文件中，随仓库一起同步（如 Remotely Save）。换设备安装插件并同步后无需重新设置；旧版 data.json 与 .quick-daily-note.json 配置会在首次加载时自动迁移。注意该文件会显示在文件管理器中（点开头的文件名 Remotely Save 不会同步）。背景图片相关设置按设备独立保存（本机 data.json），不参与同步，各设备可设置不同的背景。")
       .setHeading();
 
     new Setting(containerEl).setName("快捷日记设置").setHeading();
@@ -4216,7 +4333,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("启用背景图片")
-      .setDesc("将整个软件界面背景设置为自定义图片；关闭后恢复默认主题背景。")
+      .setDesc("将整个软件界面背景设置为自定义图片；关闭后恢复默认主题背景。背景相关设置按设备独立保存，不随仓库同步。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.bgEnabled)

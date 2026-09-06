@@ -30,11 +30,11 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 - **Code block delete** — a delete button next to the native copy button on rendered code blocks (reading view & live preview) removes the whole block from the note.
 - **Inline code copy** — click inline code in reading view to copy its content instantly (Alt/Ctrl+click in live preview/editor, so plain clicks still position the cursor); code blocks are unaffected. Toggleable in settings.
 - **Blank lines around media** — pasted images and pasted code blocks are inserted with an empty line above and below; a command "Blank lines around images/code blocks" formats the current note the same way (fences of any length/type are respected, code block content is untouched).
-- **Sync-ready storage** — plugin settings and todo data are saved to a single file `quick-daily-note.json` in the vault root, so they sync across devices with vault sync tools (e.g. Remotely Save). The name intentionally has no dot prefix — Remotely Save skips dotfiles. Legacy `data.json` / `.quick-daily-note.json` configs are auto-migrated on first load, and changes synced in from another device reload automatically.
+- **Sync-ready storage** — plugin settings and todo data are saved to a single file `quick-daily-note.json` in the vault root, so they sync across devices with vault sync tools (e.g. Remotely Save). The name intentionally has no dot prefix — Remotely Save skips dotfiles. Legacy `data.json` / `.quick-daily-note.json` configs are auto-migrated on first load, and changes synced in from another device reload automatically. **Background settings are per-device** (stored locally in the plugin's data.json, not synced), so each device can have its own wallpaper.
 
 ### 🖼️ Image Enhancements
 - Images fit the note width automatically; overly tall images are height-limited.
-- Hover a rendered image for a toolbar: crop, zoom, copy, rename, delete (deleting also removes the references in notes and moves the file to the system trash).
+- Hover a rendered image for a toolbar: crop, copy, rename, delete (deleting also removes the references in notes and moves the file to the system trash). Click the image to zoom.
 - Click an image to view it enlarged, with crop and other actions in the modal toolbar.
 
 ### 📈 Mermaid Enhancements
@@ -84,7 +84,6 @@ Download the latest release from GitHub, and copy `main.js`, `manifest.json`, an
 | Button | Action |
 | --- | --- |
 | ✂ | Crop |
-| ⛶ | Zoom in |
 | ⧉ | Copy |
 | ✎ | Rename |
 | 🗑 | Delete (removes note references; file goes to the trash) |

@@ -440,6 +440,14 @@
   z-index: 10;
 }
 
+/* 实时预览中原生 embed-actions（放大 + 编辑区块按钮）横排在块右上角（约 4~30px 高），
+   工具栏从其下方沿图片右侧竖排展开，零重叠且不遮图片顶部；阅读视图无原生按钮，保持横排贴角 */
+.markdown-source-view .qdn-img-toolbar {
+  top: 38px;
+  right: 6px;
+  flex-direction: column;
+}
+
 .qdn-img-enhancer:hover .qdn-img-toolbar {
   opacity: 1;
 }
@@ -789,6 +797,11 @@ button.qdn-danger-btn {
   box-shadow: var(--shadow-s);
   opacity: 0.35;
   transition: opacity 0.15s ease;
+}
+
+/* 实时预览中原生"编辑这个区块"按钮占右上角约 34px，工具栏右对齐时与之重叠，左移让位 */
+.cm-embed-block .mermaid-enhancer-toolbar {
+  margin-inline-end: 40px;
 }
 
 .mermaid-enhancer-container:hover .mermaid-enhancer-toolbar,

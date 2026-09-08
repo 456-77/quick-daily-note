@@ -1108,16 +1108,37 @@ body.is-mobile .qdn-todos-pending {
 body.is-mobile .qdn-todo-item:hover {
   background-color: transparent;
 }
+/* ⋯ 菜单按钮改为常规行内元素：绝对定位悬浮在手机上会被原生控件样式放大成
+   竖长半透明块、溢出压到上下行的文字上，显示效果差；改回行尾固定按钮参与 flex 布局 */
 body.is-mobile .qdn-todo-more {
+  position: static;
+  transform: none;
   opacity: 1;
   pointer-events: auto;
+  flex-shrink: 0;
+  align-self: center;
+  min-height: 0;
+  height: auto;
+  padding: 4px 8px;
+  font-size: 15px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }
-/* ⋯ 常显后给文字留出右端空间，避免正文压在按钮下面 */
-body.is-mobile .qdn-todo-text {
-  padding-right: 34px;
+/* 移动端原生控件 min-height 会把复选框撑高成竖条，锁回 16px 方形 */
+body.is-mobile .qdn-todo-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  max-width: 16px;
+  max-height: 16px;
 }
-body.is-mobile .qdn-day-note-name {
-  padding-right: 30px;
+/* 编辑中的行在移动端不悬浮钉住（sticky 定位 + 阴影在半透明背景变量下
+   会形成一条压在内容上的暗色横带） */
+body.is-mobile .qdn-todo-editing {
+  position: static;
+  box-shadow: none;
 }
 /* 「添加」按钮（新增待办弹窗内）压回常规高度 */
 body.is-mobile .qdn-todo-add-btn {

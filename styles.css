@@ -175,6 +175,11 @@
   min-width: 0;
 }
 
+/* 部分主题的 --background-modifier-hover 透明度≈0，待办行背景形同虚设；
+   且面板背景可能来自主题/背景插件/本插件的背景图（含动态壁纸视频），
+   其暗色区域会透过列表随播放漂移，看起来像一条突兀的"分界线"。
+   给列表加毛玻璃底衬——模糊抹平背景细节 + 轻微底色保证行内容对比；
+   在不透明普通主题下 backdrop 与同色底衬几乎无视觉变化 */
 .qdn-todo-list {
     max-height: 40vh;
     overflow-y: auto;
@@ -182,6 +187,14 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* 部分主题/CSS 管理器片段会给面板挂一层绝对定位的暗色渐变装饰（如
+   linear-gradient(to top, rgb(2,2,2)...) 的 ::after 覆盖层）。它画在面板内容
+   之上，其暗色区域压在待办列表中段时视觉上像一条突兀的"分界线"，且随主题
+   背景图固定出现。仅在本插件面板内隐藏该装饰层，其他面板不受影响 */
+.workspace .workspace-leaf-content.qdn-panel::after {
+  display: none;
 }
 
 .qdn-todo-item {

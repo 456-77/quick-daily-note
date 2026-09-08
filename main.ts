@@ -79,6 +79,8 @@ interface QuickDailyNoteSettings {
   autoDetectCodeLang: boolean;
   /** 点击行内代码复制内容（阅读视图单击；实时预览 Alt/Ctrl+点击） */
   inlineCodeCopyEnabled: boolean;
+  /** Alt+点击复制整行（实时预览/编辑器复制所在源码行；阅读视图复制所在块） */
+  copyLineClickEnabled: boolean;
   /** 启用"选中文本设置标题等级"命令 */
   enableHeadingLevelCommand: boolean;
   /** 粘贴图片自动保存到指定目录 */
@@ -89,6 +91,8 @@ interface QuickDailyNoteSettings {
   explorerPasteEnabled: boolean;
   /** 显示仓库中的隐藏文件（同步 Obsidian 全局设置） */
   showHiddenFiles: boolean;
+  /** Alt+左键点击文件管理器中的文件：在系统资源管理器中打开 */
+  altClickRevealEnabled: boolean;
   /** 粘贴图片保存目录（vault 内相对路径） */
   pastedImageFolder: string;
   /** 图片渲染增强 */
@@ -139,11 +143,13 @@ const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
   emailAccessKey: "",
   autoDetectCodeLang: true,
   inlineCodeCopyEnabled: true,
+  copyLineClickEnabled: false,
   enableHeadingLevelCommand: true,
   autoSavePastedImages: false,
   autoSavePastedFiles: false,
   explorerPasteEnabled: true,
   showHiddenFiles: false,
+  altClickRevealEnabled: false,
   pastedImageFolder: "attachments",
   imageEnhancerEnabled: true,
   imageMaxHeightPct: 70,
@@ -386,7 +392,9 @@ export default class QuickDailyNotePlugin extends Plugin {
 
     document.addEventListener("click", this.zoomClickHandler, true);
     document.addEventListener("click", this.handleInlineCodeClick, true);
+    document.addEventListener("click", this.handleCopyLineClick, true);
     document.addEventListener("click", this.handleExplorerClick, true);
+    document.addEventListener("click", this.handleExplorerAltClick, true);
     document.addEventListener("keydown", this.handleExplorerKeys, true);
     document.addEventListener("paste", this.handleExplorerPaste, true);
     document.addEventListener("mousedown", this.handleCursorMousedown, true);
@@ -415,7 +423,9 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.mermaidObserver = null;
     document.removeEventListener("click", this.zoomClickHandler, true);
     document.removeEventListener("click", this.handleInlineCodeClick, true);
+    document.removeEventListener("click", this.handleCopyLineClick, true);
     document.removeEventListener("click", this.handleExplorerClick, true);
+    document.removeEventListener("click", this.handleExplorerAltClick, true);
     document.removeEventListener("keydown", this.handleExplorerKeys, true);
     document.removeEventListener("paste", this.handleExplorerPaste, true);
     document.removeEventListener("mousedown", this.handleCursorMousedown, true);
@@ -677,9 +687,9 @@ export default class QuickDailyNotePlugin extends Plugin {
   /** CM6 EditorView 最小形状（obsidian typings 未暴露 editor.cm，运行时可用） */
   private cmViewOf(view: MarkdownView): {
     posAtDOM(node: Node): number;
-    state: { doc: { lineAt(pos: number): { number: number }; toString(): string } };
+    state: { doc: { lineAt(pos: number): { number: number; text: string }; toString(): string } };
   } | null {
-    return (view.editor as unknown as { cm?: { posAtDOM(node: Node): number; state: { doc: { lineAt(pos: number): { number: number }; toString(): string } } } }).cm ?? null;
+    return (view.editor as unknown as { cm?: { posAtDOM(node: Node): number; state: { doc: { lineAt(pos: number): { number: number; text: string }; toString(): string } } } }).cm ?? null;
   }
 
   /**
@@ -1130,6 +1140,58 @@ export default class QuickDailyNotePlugin extends Plugin {
       .then(() => {
         const shown = text.length > 40 ? text.slice(0, 40) + "…" : text;
         new Notice(`已复制行内代码：${shown}`, 2000);
+      })
+      .catch(() => new Notice("复制失败", 1500));
+  };
+
+  /**
+   * Alt+点击复制整行（document capture 阶段）：
+   * 实时预览/编辑器中按住 Alt 点击任意一行，复制该行全部源码文本（CM6 posAtDOM 反查，
+   * 不依赖 data-line 等 DOM 属性）；阅读视图中复制点击所在块（段落/标题/列表项等）的文本。
+   * 任务复选框保持原生切换、代码块保留原生复制按钮，均不处理；
+   * 行内代码区域由 handleInlineCodeClick 先注册先接管，不会走到这里。
+   */
+  private handleCopyLineClick = (e: MouseEvent): void => {
+    if (!this.settings.copyLineClickEnabled) return;
+    // 仅 Alt+左键：Ctrl/Cmd+点击是 Obsidian 原生的"在新面板打开链接"，不抢
+    if (e.button !== 0 || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    if (target.closest("input[type=checkbox], pre")) return;
+
+    const view = this.findMarkdownView(target);
+    if (!view) return;
+
+    let text = "";
+    const cmLine = target.closest(".cm-line");
+    if (cmLine) {
+      const cm = this.cmViewOf(view);
+      if (cm) {
+        try {
+          text = cm.state.doc.lineAt(cm.posAtDOM(cmLine)).text;
+        } catch {
+          text = "";
+        }
+      }
+      // 兜底：typings 之外的运行环境拿不到 cm 时退回 DOM 文本
+      if (!text) text = (cmLine.textContent ?? "").trim();
+    } else {
+      // 阅读视图没有"行"的概念，最近一块（段落/标题/列表项/引用块）即"整行"
+      const block = target.closest("p, h1, h2, h3, h4, h5, h6, li, blockquote");
+      if (!block) return;
+      text = (block.textContent ?? "").trim();
+    }
+    if (!text) {
+      new Notice("该行没有内容");
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        const shown = text.length > 40 ? text.slice(0, 40) + "…" : text;
+        new Notice(`已复制整行：${shown}`, 2000);
       })
       .catch(() => new Notice("复制失败", 1500));
   };
@@ -2130,6 +2192,54 @@ export default class QuickDailyNotePlugin extends Plugin {
     }
   };
 
+  /** Alt+左键点击文件管理器中的文件/文件夹：在系统资源管理器中显示（文件夹直接打开） */
+  private handleExplorerAltClick = (e: MouseEvent): void => {
+    if (!this.settings.altClickRevealEnabled) return;
+    if (e.button !== 0 || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const target = e.target as Element | null;
+    const container = this.explorerContainer();
+    if (!target || !container || !container.contains(target)) return;
+    const nav = target.closest<HTMLElement>("[data-path]");
+    if (!nav) return;
+    const abs = this.app.vault.getAbstractFileByPath(normalizePath(nav.getAttribute("data-path") ?? ""));
+    if (!abs) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // desktop 端 window.require 可用；移动端不存在，直接提示
+    const req = (
+      window as unknown as {
+        require?: (id: string) => {
+          shell: { showItemInFolder(fullPath: string): void; openPath(fullPath: string): Promise<string> };
+        };
+      }
+    ).require;
+    if (!req) {
+      new Notice("当前环境不支持打开系统资源管理器");
+      return;
+    }
+    try {
+      // DataAdapter 接口未声明 getFullPath（typings 缺失），运行时桌面端可用
+      const adapter = this.app.vault.adapter as unknown as { getFullPath?: (p: string) => string };
+      if (!adapter.getFullPath) {
+        new Notice("当前环境不支持打开系统资源管理器");
+        return;
+      }
+      const electron = req("electron");
+      const fullPath = adapter.getFullPath(abs.path);
+      if (abs instanceof TFolder) {
+        // 文件夹：直接打开该目录
+        void electron.shell.openPath(fullPath);
+      } else {
+        // 文件：高亮定位到该文件（不做窗口最小化等干预，Obsidian 保持原状；
+        // 资源管理器窗口可能被 Obsidian 挡住，切换任务栏即可看到）
+        electron.shell.showItemInFolder(fullPath);
+      }
+    } catch (err) {
+      console.error("Quick Daily Note: 在系统资源管理器中打开失败", err);
+      new Notice("打开系统资源管理器失败");
+    }
+  };
+
   /** 解析当前文件管理器选中项：最近点击 → 焦点所在导航项 → 文件管理器中高亮打开的文件 */
   private currentSelection(): { path: string; isFolder: boolean } | null {
     if (this.explorerSelection) return this.explorerSelection;
@@ -2654,7 +2764,9 @@ export default class QuickDailyNotePlugin extends Plugin {
     const pending = items.filter((i) => !i.done);
     if (pending.length === 0) return 0;
     const target = this.settings.todos[toDate] ?? [];
-    target.push(...pending.map((i) => ({ text: `[昨日遗留] ${i.text}`, done: false })));
+    target.push(
+      ...pending.map((i) => ({ text: `${this.carryPrefix(fromDate)} ${this.stripCarryPrefix(i.text)}`, done: false }))
+    );
     this.settings.todos[toDate] = target;
     this.settings.todos[fromDate] = items.filter((i) => i.done);
     await this.saveSettings();
@@ -2662,9 +2774,20 @@ export default class QuickDailyNotePlugin extends Plugin {
     return pending.length;
   }
 
+  /** 剥离旧的遗留前缀（[昨日遗留]、叠加的多个、或旧的日期前缀），顺延时统一替换为新前缀 */
+  private stripCarryPrefix(text: string): string {
+    return text.replace(/^(?:\[[^\]]*遗留\]\s*)+/, "");
+  }
+
+  /** 遗留前缀：标记该待办是从哪一天顺延过来的（如 [09-07 遗留]），重复顺延只更新日期不叠加 */
+  private carryPrefix(fromDate: string): string {
+    const d = moment(fromDate, this.settings.dateFormat, true);
+    return `[${d.isValid() ? d.format("MM-DD") : fromDate} 遗留]`;
+  }
+
   /** 判断目标日期是否已包含顺延过来的待办（避免重复顺延） */
   hasCarriedOver(dateStr: string): boolean {
-    return (this.settings.todos[dateStr] ?? []).some((i) => i.text.startsWith("[昨日遗留]"));
+    return (this.settings.todos[dateStr] ?? []).some((i) => /^\[[^\]]*遗留\]/.test(i.text));
   }
 
   /**
@@ -3216,18 +3339,29 @@ class CalendarView extends ItemView {
       nameEl.addEventListener("click", () => {
         void this.plugin.app.workspace.getLeaf(false).openFile(file);
       });
-      const actions = row.createDiv("qdn-day-note-actions");
-      const renameBtn = actions.createEl("button", { text: "✎", cls: "qdn-day-note-btn" });
-      renameBtn.setAttr("aria-label", "重命名");
-      renameBtn.addEventListener("click", (evt) => {
+      // 行尾固定 ⋯ 图标（始终占位，悬浮按钮式布局会导致悬停/移开时文本重排）
+      const moreBtn = row.createEl("button", { text: "⋯", cls: "qdn-todo-more" });
+      moreBtn.setAttr("aria-label", "更多操作");
+      moreBtn.addEventListener("click", (evt) => {
         evt.stopPropagation();
-        new RenameImageModal(this.plugin.app, this.plugin, file, () => this.render(), "重命名日记").open();
-      });
-      const deleteBtn = actions.createEl("button", { text: "🗑", cls: "qdn-day-note-btn" });
-      deleteBtn.setAttr("aria-label", "删除（移入系统回收站）");
-      deleteBtn.addEventListener("click", (evt) => {
-        evt.stopPropagation();
-        new DayNoteDeleteModal(this.plugin.app, file, () => this.render()).open();
+        const menu = new Menu();
+        menu.addItem((mi) =>
+          mi
+            .setTitle("重命名")
+            .setIcon("pencil")
+            .onClick(() => {
+              new RenameImageModal(this.plugin.app, this.plugin, file, () => this.render(), "重命名日记").open();
+            })
+        );
+        menu.addItem((mi) =>
+          mi
+            .setTitle("删除")
+            .setIcon("trash-2")
+            .onClick(() => {
+              new DayNoteDeleteModal(this.plugin.app, file, () => this.render()).open();
+            })
+        );
+        menu.showAtMouseEvent(evt);
       });
     }
   }
@@ -3280,7 +3414,11 @@ class CalendarView extends ItemView {
     if (items.length === 0) {
       list.createDiv("qdn-todo-empty").setText("暂无待办，添加一条吧");
     } else {
-      items.forEach((item, index) => {
+      // 未完成排在已完成上面（组内保持原顺序），index 仍指向原始数组
+      const order = items
+        .map((item, index) => ({ item, index }))
+        .sort((a, b) => Number(a.item.done) - Number(b.item.done));
+      for (const { item, index } of order) {
         const row = list.createDiv("qdn-todo-item");
         if (item.done) row.addClass("qdn-todo-completed");
         const checkbox = row.createEl("input", { type: "checkbox" });
@@ -3325,32 +3463,44 @@ class CalendarView extends ItemView {
             this.render();
           });
 
-          const editBtn = row.createEl("button", {
-            text: "✎",
-            cls: "qdn-todo-edit-btn",
+          // 行尾固定 ⋯ 图标（始终占位，悬浮按钮式布局会导致聚焦/失焦时文本重排）
+          const moreBtn = row.createEl("button", {
+            text: "⋯",
+            cls: "qdn-todo-more",
           });
-          editBtn.setAttr("aria-label", "编辑");
-          editBtn.addEventListener("click", () => {
-            this.editingIndex = index;
-            this.render();
-          });
-
-          const copyBtn = row.createEl("button", {
-            text: "⧉",
-            cls: "qdn-todo-edit-btn",
-          });
-          copyBtn.setAttr("aria-label", "复制");
-          copyBtn.addEventListener("click", () => {
-            void this.copyTodoText(item.text);
+          moreBtn.setAttr("aria-label", "更多操作");
+          moreBtn.addEventListener("click", (evt) => {
+            evt.stopPropagation();
+            const menu = new Menu();
+            menu.addItem((mi) =>
+              mi
+                .setTitle("修改")
+                .setIcon("pencil")
+                .onClick(() => {
+                  this.editingIndex = index;
+                  this.render();
+                })
+            );
+            menu.addItem((mi) =>
+              mi
+                .setTitle("复制")
+                .setIcon("copy")
+                .onClick(() => {
+                  void this.copyTodoText(item.text);
+                })
+            );
+            menu.addItem((mi) =>
+              mi
+                .setTitle("删除")
+                .setIcon("trash-2")
+                .onClick(() => {
+                  void this.plugin.deleteTodo(this.selectedDate, index);
+                })
+            );
+            menu.showAtMouseEvent(evt);
           });
         }
-
-        row
-          .createEl("button", { text: "×", cls: "qdn-todo-delete" })
-          .addEventListener("click", () => {
-            void this.plugin.deleteTodo(this.selectedDate, index);
-          });
-      });
+      }
     }
 
     const inputRow = wrapper.createDiv("qdn-todo-add");
@@ -4238,6 +4388,18 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Alt+左键在系统资源管理器中打开")
+      .setDesc("开启后，按住 Alt 并左键点击左侧文件管理器中的文件，将在系统资源管理器中高亮定位该文件（文件夹则直接打开该目录），Obsidian 窗口保持不动；适合快速定位附件在磁盘上的位置。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.altClickRevealEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.altClickRevealEnabled = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("点击行内代码复制")
       .setDesc("阅读视图中单击行内代码即可复制其内容；实时预览/编辑器中用 Alt+点击（或 Ctrl/Cmd+点击），普通点击仍用于定位光标。代码块不受影响（已有原生复制按钮）。")
       .addToggle((toggle) =>
@@ -4245,6 +4407,18 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.inlineCodeCopyEnabled)
           .onChange(async (value) => {
             this.plugin.settings.inlineCodeCopyEnabled = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("快捷复制整行（Alt+点击）")
+      .setDesc("开启后，按住 Alt 并左键点击任意一行即可复制整行内容，无需手动再选中：实时预览/编辑器中复制光标所在源码行，阅读视图中复制点击所在的段落/标题/列表项文本。普通点击不受影响，任务复选框仍正常切换；行内代码区域 Alt+点击仍优先复制代码本身。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.copyLineClickEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.copyLineClickEnabled = value;
             await this.plugin.saveSettings();
           })
       );

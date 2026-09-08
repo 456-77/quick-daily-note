@@ -10,6 +10,7 @@ import {
   Notice,
   Plugin,
   PluginSettingTab,
+  Platform,
   requestUrl,
   Setting,
     SettingDefinitionItem,
@@ -3397,18 +3398,25 @@ class CalendarView extends ItemView {
       }
     }
 
-    const header = wrapper.createDiv("qdn-todos-header");
-    const dateLabel = header.createDiv("qdn-todos-date");
-    dateLabel.createSpan().setText(`待办 · ${this.selectedDate}`);
-    dateLabel
-      .createEl("button", { text: "打开日记", cls: "qdn-open-note-btn" })
-      .addEventListener("click", () => {
-        void this.plugin.openOrCreateDailyNote(this.selectedDate);
-      });
-
     const items = this.plugin.settings.todos[this.selectedDate] ?? [];
     const pending = items.filter((item) => !item.done).length;
-    header.createSpan({ cls: "qdn-todos-count" }).setText(`${pending} 项未完成`);
+
+    const header = wrapper.createDiv("qdn-todos-header");
+    const dateLabel = header.createDiv("qdn-todos-date");
+    if (Platform.isMobile) {
+      // 移动端空间有限：标题行省去日期（日历已可见）直接显示未完成数，
+      // 右侧「+ 新增」按钮（与当天日记的「+ 新建」同位）弹出输入框，省去常驻输入栏
+      dateLabel.createSpan().setText("待办");
+      dateLabel.createSpan({ cls: "qdn-todos-pending" }).setText(`${pending} 项未完成`);
+      header
+        .createEl("button", { text: "+ 新增", cls: "qdn-todo-new-btn" })
+        .addEventListener("click", () => {
+          new AddTodoModal(this.app, this.plugin, this.selectedDate).open();
+        });
+    } else {
+      dateLabel.createSpan().setText(`待办 · ${this.selectedDate}`);
+      header.createSpan({ cls: "qdn-todos-count" }).setText(`${pending} 项未完成`);
+    }
 
     const list = wrapper.createDiv("qdn-todo-list");
     if (items.length === 0) {
@@ -3503,6 +3511,9 @@ class CalendarView extends ItemView {
       }
     }
 
+    // 常驻输入栏仅桌面端保留；移动端用头部「+ 新增」弹窗代替（节省纵向空间）
+    if (Platform.isMobile) return;
+
     const inputRow = wrapper.createDiv("qdn-todo-add");
     const input = inputRow.createEl("input", {
       type: "text",
@@ -3521,6 +3532,51 @@ class CalendarView extends ItemView {
         void this.plugin.addTodo(this.selectedDate, input.value);
         input.value = "";
       });
+  }
+}
+
+/** 新增待办弹窗（移动端）：回车连续添加，Esc 关闭 */
+class AddTodoModal extends Modal {
+  private plugin: QuickDailyNotePlugin;
+  private dateStr: string;
+
+  constructor(app: App, plugin: QuickDailyNotePlugin, dateStr: string) {
+    super(app);
+    this.plugin = plugin;
+    this.dateStr = dateStr;
+  }
+
+  onOpen() {
+    this.titleEl.setText(`新增待办 · ${this.dateStr}`);
+    this.contentEl.addClass("qdn-add-todo-modal");
+    const input = this.contentEl.createEl("input", {
+      type: "text",
+      placeholder: "输入待办内容，回车连续添加",
+    });
+    input.addClass("qdn-add-todo-input");
+    const submit = () => {
+      const value = input.value.trim();
+      if (!value) return;
+      void this.plugin.addTodo(this.dateStr, value);
+      input.value = "";
+      input.focus();
+    };
+    input.addEventListener("keydown", (evt) => {
+      if (evt.key === "Enter") {
+        evt.preventDefault();
+        submit();
+      }
+    });
+    const actions = this.contentEl.createDiv("qdn-add-todo-actions");
+    actions
+      .createEl("button", { text: "添加", cls: "qdn-todo-add-btn" })
+      .addEventListener("click", submit);
+    // 移动端弹软键盘需要稍等布局完成
+    window.setTimeout(() => input.focus(), 50);
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
 

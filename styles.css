@@ -175,23 +175,6 @@
   min-width: 0;
 }
 
-.qdn-open-note-btn {
-  background: transparent;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 4px;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 11px;
-  padding: 1px 6px;
-  transition: color 0.15s ease, border-color 0.15s ease;
-  flex-shrink: 0;
-}
-
-.qdn-open-note-btn:hover {
-  color: var(--text-normal);
-  border-color: var(--interactive-accent);
-}
-
 .qdn-todo-list {
     max-height: 40vh;
     overflow-y: auto;
@@ -1078,5 +1061,100 @@ body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header:not(.is-
   padding: 3px 8px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* ===== 移动端适配（Obsidian 在移动端给 body 加 is-mobile 类，桌面不受影响） ===== */
+/* 待办列表取消内嵌滚动（移动端嵌套滚动手感差），跟随面板统一滚动 */
+body.is-mobile .qdn-todo-list {
+  max-height: none;
+  overflow-y: visible;
+}
+/* 底部占位：移动端没有桌面状态栏，改为给底部悬浮标签切换条留出空间 */
+body.is-mobile .qdn-panel-spacer {
+  flex: 0 0 84px;
+  height: 84px;
+}
+/* 移动端原生按钮样式会把小按钮放大成大灰块（默认灰底 + 大触控高度），
+   待办头部「+ 新增」与当天日记「＋ 新建」压回紧凑的描边幽灵按钮 */
+body.is-mobile .qdn-todo-new-btn,
+body.is-mobile .qdn-day-notes-add {
+  min-height: 0;
+  height: auto;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  box-shadow: none;
+  flex-shrink: 0;
+}
+body.is-mobile .qdn-todo-new-btn:hover,
+body.is-mobile .qdn-day-notes-add:hover {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+  background: transparent;
+}
+/* 待办标题行的「N 项未完成」 */
+body.is-mobile .qdn-todos-pending {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+/* 手机没有真正的 hover：点过的行会一直卡在悬停态（行高亮 + 不透明悬浮按钮
+   叠在文字上像一条突兀的深色横带）。去掉行悬停高亮，⋯ 菜单按钮改为常显
+   （触屏本来也无法唤出 hover） */
+body.is-mobile .qdn-todo-item:hover {
+  background-color: transparent;
+}
+body.is-mobile .qdn-todo-more {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* ⋯ 常显后给文字留出右端空间，避免正文压在按钮下面 */
+body.is-mobile .qdn-todo-text {
+  padding-right: 34px;
+}
+body.is-mobile .qdn-day-note-name {
+  padding-right: 30px;
+}
+/* 「添加」按钮（新增待办弹窗内）压回常规高度 */
+body.is-mobile .qdn-todo-add-btn {
+  min-height: 0;
+  height: auto;
+  padding: 7px 14px;
+  font-size: 13px;
+  border-radius: 6px;
+}
+/* 日历紧凑一点，减少面板纵向占用 */
+body.is-mobile .qdn-cal-cell {
+  padding: 2px 0;
+  font-size: 12px;
+}
+body.is-mobile .qdn-cal-weekday {
+  font-size: 10px;
+}
+body.is-mobile .qdn-calendar {
+  margin-bottom: 12px;
+}
+
+/* 新增待办弹窗（移动端「+ 新增」按钮唤起） */
+.qdn-add-todo-input {
+  width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  padding: 8px 10px;
+  font-size: 14px;
+}
+.qdn-add-todo-input:focus {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 20%, transparent);
+}
+.qdn-add-todo-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 

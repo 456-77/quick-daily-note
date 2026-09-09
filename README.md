@@ -9,9 +9,12 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 ### 📝 Daily Notes
 - Click the calendar icon in the ribbon, or run the command "New daily note (enter name)" to create a note titled "date + name" — the folder and date format are configurable. If a note with the same name exists, it opens directly.
 - In the sidebar calendar panel, double-click a date to open or create that day's note.
+- **Weekly notes** — the calendar has a "W" (weekly) column on the left of the day grid, separated by a divider, one cell per week row: double-click it to open that week's note (named by ISO week, e.g. "2026-W37 周记") or create it for a weekly study summary. A single click changes nothing — the selected date, the todo list and the day-note list stay untouched; weeks that already have a note show a dot.
+- **Templates** — optionally apply a Markdown template when creating daily or weekly notes (toggle in settings, template file picked from the vault). Placeholders are replaced on creation: `{{title}}`, `{{date}}`, `{{time}}`, `{{date:FORMAT}}`, and `{{week}}` (weekly notes only, e.g. 2026-W37; there `{{date}}` is the week's Monday).
 
 ### ✅ Calendar & Todos
 - The calendar panel manages todos per day: add with the input box (Enter), check off, double-click to edit text, or open the row-end ⋯ menu for edit / copy / delete.
+- **Multi-line todos** — the add box and the todo editor are auto-growing text areas that wrap long text (no more moving the cursor horizontally through a single line): Enter confirms / saves, Shift+Enter inserts a newline, and multi-line todo text renders with line breaks preserved (the weekly review flattens them into single checklist lines).
 - When yesterday has unfinished todos, a "Carry over to today" banner appears at the top — one click moves them to today, marked as "carried over".
 - Below the calendar: stats for this month's diary days, consecutive diary days, and today's word count.
 - **Multiple daily notes per day** — click a date in the calendar panel to list all daily notes created for that day; click a title to jump to that note, or use ＋ New to create another one for the same day.
@@ -22,6 +25,7 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 
 ### 📊 Weekly Review
 - The command "Generate weekly review" summarizes the week's diaries (days, word count, titles) and completed/uncompleted todos into Markdown, inserted at the cursor.
+- The command "Generate weekly review for a chosen week" first shows a picker of the last 12 weeks (including the current one, searchable by week number or date) and generates the same summary for the selected week (titled e.g. "2026-W36 回顾").
 
 ### ⌨️ Paste Enhancements
 - Auto-detect the language of pasted code (30+ languages, including Mermaid diagrams, zero dependencies) and wrap it in a fenced code block; plain text, single-line weak matches, and pastes inside code blocks are left alone.
@@ -29,7 +33,7 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 - **File explorer copy/paste** — with a file or folder selected in the sidebar file explorer, `Ctrl/Cmd+C` / `Ctrl/Cmd+X` copy or cut it (folders included, copied recursively), and `Ctrl/Cmd+V` pastes it into the selected folder, or the folder of the selected file — even while that file is open — (duplicates get a numbered suffix); files copied from the system file manager can be pasted into the vault the same way. Copying/pasting text in the editor keeps its native behavior. Toggleable in settings.
 - **Code block delete** — a delete button next to the native copy button on rendered code blocks (reading view & live preview) removes the whole block from the note.
 - **Inline code copy** — click inline code in reading view to copy its content instantly (Alt/Ctrl+click in live preview/editor, so plain clicks still position the cursor); code blocks are unaffected. Toggleable in settings.
-- **Quick line copy** — hold Alt and click anywhere on a line to copy the whole line without selecting it (live preview/editor copies the source line under the cursor; reading view copies the clicked paragraph/heading/list item). Plain clicks are unaffected and task checkboxes still toggle; Alt+click on inline code still copies the code itself. Off by default, toggleable in settings.
+- **Quick line copy** — hold Alt and click anywhere on a line to copy the whole line without selecting it (live preview/editor copies the source line under the cursor; reading view copies the clicked paragraph/heading/list item, and lines inside code blocks are located by click position with indentation preserved). Plain clicks are unaffected and task checkboxes still toggle; Alt+click on inline code still copies the code itself. Off by default, toggleable in settings.
 - **Blank lines around media** — pasted images and pasted code blocks are inserted with an empty line above and below; a command "Blank lines around images/code blocks" formats the current note the same way (fences of any length/type are respected, code block content is untouched).
 - **Sync-ready storage** — plugin settings and todo data are saved to a single file `quick-daily-note.json` in the vault root, so they sync across devices with vault sync tools (e.g. Remotely Save). The name intentionally has no dot prefix — Remotely Save skips dotfiles. Legacy `data.json` / `.quick-daily-note.json` configs are auto-migrated on first load, and changes synced in from another device reload automatically. **Background settings are per-device** (stored locally in the plugin's data.json, not synced), so each device can have its own wallpaper.
 
@@ -78,6 +82,7 @@ Download the latest release from GitHub, and copy `main.js`, `manifest.json`, an
 | Open calendar & todo panel | Open the calendar and todo panel |
 | Set heading level for selection | Normalize headings in the selected text block (toggleable in settings) |
 | Generate weekly review | Summarize the week's diaries and todos at the cursor |
+| Generate weekly review for a chosen week | Pick one of the last 12 weeks, then summarize that week's diaries and todos at the cursor |
 | Back to previous cursor (same note) | Return to the previous cursor position in the current note; also triggered by the back shortcut (Alt+← / Cmd+Alt+←) |
 
 ### Image Toolbar Buttons

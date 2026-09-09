@@ -93,8 +93,24 @@
 
 .qdn-cal-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  position: relative;
+  /* 第 1 列为周记列（W），固定宽度，其余 7 列等分 */
+  grid-template-columns: 24px repeat(7, 1fr);
   gap: 2px;
+}
+
+/* W 列与日历之间的连续竖向分隔线：整条线画在网格容器上（绝对定位、贯穿全高），
+   不依赖逐格边框，行间隙/行高差异都不会产生断点 */
+.qdn-cal-grid::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* 24px 的 W 列 + 2px 间隙的中点 */
+  left: 25px;
+  width: 1px;
+  background: var(--background-modifier-border);
+  pointer-events: none;
 }
 
 .qdn-cal-cell {
@@ -142,6 +158,16 @@
   border-radius: 50%;
   background: var(--interactive-accent);
   margin-top: 1px;
+}
+
+/* 周记格：每行行首（日历左侧），单击不改变选中与待办，双击打开/创建该周周记 */
+.qdn-cal-week-cell {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.qdn-cal-week-cell:hover {
+  color: var(--text-accent);
 }
 
 /* 待办事项 */
@@ -270,6 +296,8 @@
   min-width: 0;
   font-size: 13px;
   word-break: break-word;
+  /* 多行待办：按换行符折行显示 */
+  white-space: pre-wrap;
   user-select: text;
   cursor: text;
   transition: color 0.15s ease, opacity 0.15s ease;
@@ -321,6 +349,11 @@
   border: 1px solid var(--interactive-accent);
   background: var(--background-primary);
   padding: 2px 6px;
+  /* 多行编辑：高度由 autosizeTextarea 按内容设定，超长封顶滚动 */
+  resize: none;
+  line-height: 1.5;
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 .qdn-todo-empty {
@@ -347,7 +380,8 @@
   margin-right: -8px;
 }
 
-.qdn-todo-add input {
+.qdn-todo-add input,
+.qdn-todo-add textarea {
   flex: 1;
   min-width: 0;
   border-radius: 6px;
@@ -358,7 +392,16 @@
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-.qdn-todo-add input:focus {
+/* 多行添加框：高度自适应，超过约 5 行后内部滚动（浮条不无限撑高） */
+.qdn-todo-add textarea {
+  resize: none;
+  line-height: 1.5;
+  max-height: 128px;
+  overflow-y: auto;
+}
+
+.qdn-todo-add input:focus,
+.qdn-todo-add textarea:focus {
   border-color: var(--interactive-accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 20%, transparent);
 }
@@ -945,6 +988,19 @@ body.qdn-bg-image .status-bar {
   --background-secondary-alt: transparent;
 }
 
+/* 背景图模式下，面板内的输入类控件若沿用 var(--background-primary) 会解析为透明，
+   底下的待办文字/壁纸透上来导致看不清输入内容。body 本层未被透明化（仍持有主题原色），
+   在此捕获为 --qdn-solid-primary 供面板内控件当实底用。 */
+body.qdn-bg-image {
+  --qdn-solid-primary: var(--background-primary);
+}
+
+body.qdn-bg-image .qdn-todo-add,
+body.qdn-bg-image .qdn-todo-edit-input,
+body.qdn-bg-image .qdn-todo-more {
+  background-color: var(--qdn-solid-primary);
+}
+
 /* 其余自带背景色的工作区元素直接透明（不参与窗口拖拽）：仓库信息栏、头部工具栏、标签页 */
 /* 高特异性兜底（对应 main.ts 的类切换）：类名连写 + 父链前缀，主题规则压不掉 */
 html body.qdn-bg-image .workspace-split.mod-left-split .workspace-sidedock-vault-profile.qdn-bg-transparent,
@@ -1153,6 +1209,11 @@ body.is-mobile .qdn-todo-editing {
   position: static;
   box-shadow: none;
 }
+/* 移动端原生 textarea 控件可能被 min-height 撑高，锁回内容自适应 */
+body.is-mobile .qdn-todo-edit-input,
+body.is-mobile .qdn-add-todo-input {
+  min-height: 0;
+}
 /* 「添加」按钮（新增待办弹窗内）压回常规高度 */
 body.is-mobile .qdn-todo-add-btn {
   min-height: 0;
@@ -1181,6 +1242,11 @@ body.is-mobile .qdn-calendar {
   background: var(--background-primary);
   padding: 8px 10px;
   font-size: 14px;
+  /* 多行输入：高度自适应，超长封顶滚动 */
+  resize: none;
+  line-height: 1.5;
+  max-height: 160px;
+  overflow-y: auto;
 }
 .qdn-add-todo-input:focus {
   border-color: var(--interactive-accent);

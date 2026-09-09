@@ -110,6 +110,14 @@ interface QuickDailyNoteSettings {
   weatherEnabled: boolean;
   /** 天气城市名 */
   weatherCity: string;
+  /** 创建日记时套用模板 */
+  dailyTemplateEnabled: boolean;
+  /** 日记模板文件路径（vault 内相对路径） */
+  dailyTemplatePath: string;
+  /** 创建周记时套用模板 */
+  weeklyTemplateEnabled: boolean;
+  /** 周记模板文件路径（vault 内相对路径） */
+  weeklyTemplatePath: string;
   /** 启用全局背景图片 */
   bgEnabled: boolean;
   /** 背景图片路径（vault 内相对路径） */
@@ -159,6 +167,10 @@ const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
   mermaidMaxHeightPct: 60,
   weatherEnabled: false,
   weatherCity: "",
+  dailyTemplateEnabled: false,
+  dailyTemplatePath: "",
+  weeklyTemplateEnabled: false,
+  weeklyTemplatePath: "",
   bgEnabled: false,
   bgImagePath: "",
   bgOpacity: 0.6,
@@ -344,13 +356,13 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.addCommand({
       id: "generate-weekly-review",
       name: "生成本周回顾",
-      callback: () => this.generateWeeklyReview(),
+      callback: () => void this.generateWeeklyReview(),
     });
 
     this.addCommand({
-      id: "blank-lines-around-blocks",
-      name: "图片/代码块与上下文空一行（整理当前文档）",
-      callback: () => void this.formatBlankLinesInActiveFile(),
+      id: "choose-weekly-review",
+      name: "生成选定周的回顾",
+      callback: () => new WeekReviewModal(this.app, this).open(),
     });
 
     this.addCommand({
@@ -1158,14 +1170,16 @@ export default class QuickDailyNotePlugin extends Plugin {
     if (e.button !== 0 || !e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     const target = e.target as HTMLElement | null;
     if (!target) return;
-    if (target.closest("input[type=checkbox], pre")) return;
+    if (target.closest("input[type=checkbox]")) return;
 
     const view = this.findMarkdownView(target);
     if (!view) return;
 
     let text = "";
     const cmLine = target.closest(".cm-line");
+    const pre = target.closest("pre");
     if (cmLine) {
+      // 实时预览/编辑器：CM6 反查源码行（代码块内的行也是 cm-line，天然支持）
       const cm = this.cmViewOf(view);
       if (cm) {
         try {
@@ -1174,15 +1188,18 @@ export default class QuickDailyNotePlugin extends Plugin {
           text = "";
         }
       }
-      // 兜底：typings 之外的运行环境拿不到 cm 时退回 DOM 文本
-      if (!text) text = (cmLine.textContent ?? "").trim();
+      // 兜底：typings 之外的运行环境拿不到 cm 时退回 DOM 文本（保留行首缩进）
+      if (!text) text = (cmLine.textContent ?? "").replace(/\s+$/, "");
+    } else if (pre) {
+      // 阅读视图代码块：行边界不是元素，按点击位置在代码纯文本中定位所在行（保留缩进）
+      text = this.readingCodeLineAt(pre, e.clientX, e.clientY);
     } else {
       // 阅读视图没有"行"的概念，最近一块（段落/标题/列表项/引用块）即"整行"
       const block = target.closest("p, h1, h2, h3, h4, h5, h6, li, blockquote");
       if (!block) return;
       text = (block.textContent ?? "").trim();
     }
-    if (!text) {
+    if (!text.trim()) {
       new Notice("该行没有内容");
       return;
     }
@@ -1196,6 +1213,29 @@ export default class QuickDailyNotePlugin extends Plugin {
       })
       .catch(() => new Notice("复制失败", 1500));
   };
+
+  /** 阅读视图代码块：点击点所在的源码文本行（行边界不是元素，按光标位置在纯文本中定位） */
+  private readingCodeLineAt(pre: HTMLElement, x: number, y: number): string {
+    const range = document.caretRangeFromPoint(x, y);
+    if (!range) return "";
+    const preRange = document.createRange();
+    preRange.selectNodeContents(pre);
+    try {
+      preRange.setEnd(range.startContainer, range.startOffset);
+    } catch {
+      return "";
+    }
+    const charOffset = preRange.toString().length;
+    const lines = (pre.textContent ?? "").split("\n");
+    let acc = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (charOffset <= acc + lines[i].length || i === lines.length - 1) {
+        return lines[i];
+      }
+      acc += lines[i].length + 1;
+    }
+    return "";
+  }
 
   private zoomClickHandler = (e: MouseEvent): void => {
     const target = e.target as HTMLElement | null;
@@ -2611,11 +2651,133 @@ export default class QuickDailyNotePlugin extends Plugin {
 
     for (const child of folder.children) {
       if (child instanceof TFile && child.extension === "md") {
+        // 周记文件（2026-W37 前缀命名）不计入日记日期集合，避免污染打点与统计
+        if (/^\d{4}-W\d{2}(?: |$)/.test(child.basename)) continue;
         const firstPart = child.basename.split(" ")[0];
         if (firstPart) set.add(firstPart);
       }
     }
     return set;
+  }
+
+  /** 收集日记文件夹中所有周记文件的周标识集合（用于日历周记列打点） */
+  getWeeklyKeySet(): Set<string> {
+    const folder = this.getDiaryFolder();
+    const set = new Set<string>();
+    if (!folder) return set;
+
+    for (const child of folder.children) {
+      if (child instanceof TFile && child.extension === "md") {
+        const matched = child.basename.match(/^(\d{4}-W\d{2})(?: |$)/);
+        if (matched && matched[1]) set.add(matched[1]);
+      }
+    }
+    return set;
+  }
+
+  /** 在日记文件夹中查找某周的周记（精确“2026-W37.md”或“2026-W37 名字”前缀），多篇时返回名字排序第一篇 */
+  findWeeklyNote(weekKey: string): TFile | null {
+    const folder = this.getDiaryFolder();
+    if (!folder) return null;
+    return (
+      folder.children
+        .filter(
+          (child): child is TFile =>
+            child instanceof TFile &&
+            child.extension === "md" &&
+            (child.name === `${weekKey}.md` || child.name.startsWith(`${weekKey} `))
+        )
+        .sort((a, b) => a.name.localeCompare(b.name))[0] ?? null
+    );
+  }
+
+  /**
+   * 打开或创建某周的周记：已有周记直接打开，没有则直接创建
+   * （一周一篇固定命名，无需像日记那样弹窗输入名字）。
+   * mondayStr 为该周周一的日期字符串（dateFormat 格式），供模板占位符使用。
+   */
+  async openOrCreateWeeklyNote(weekKey: string, mondayStr: string) {
+    const file = this.findWeeklyNote(weekKey);
+    if (file) {
+      void this.app.workspace.getLeaf(false).openFile(file);
+      return;
+    }
+    await this.createWeeklyNote(weekKey, mondayStr);
+  }
+
+  /** 创建周记：标题 = 周标识 + “周记”，存放在日记文件夹中，套用周记模板（周记不记天气） */
+  async createWeeklyNote(weekKey: string, mondayStr: string) {
+    const title = `${weekKey} 周记`;
+    const folderPath = normalizePath(this.settings.folder);
+    const filePath = normalizePath(
+      folderPath ? `${folderPath}/${title}.md` : `${title}.md`
+    );
+
+    await this.ensureFolder(folderPath);
+
+    const existing = this.app.vault.getAbstractFileByPath(filePath);
+    if (existing instanceof TFile) {
+      void this.app.workspace.getLeaf(false).openFile(existing);
+      new Notice(`周记已存在，已打开：${title}`);
+      this.refreshViews();
+      return;
+    }
+
+    const monday = moment(mondayStr, this.settings.dateFormat, true);
+    const initialContent =
+      (await this.getTemplateContent(
+        this.settings.weeklyTemplateEnabled,
+        this.settings.weeklyTemplatePath,
+        {
+          title,
+          dateMoment: monday.isValid() ? monday : moment(),
+          week: weekKey,
+        }
+      )) ?? `# ${title}\n`;
+
+    const file = await this.app.vault.create(filePath, initialContent);
+    void this.app.workspace.getLeaf(false).openFile(file);
+    new Notice(`已创建周记：${title}`);
+    this.refreshViews();
+  }
+
+  /**
+   * 读取模板内容并替换占位符（新建日记/周记时用）：
+   * {{title}} 笔记标题、{{date}} 日期、{{time}} 时间、{{week}} 周标识（周记）、
+   * {{date:格式}} 指定 moment 格式的日期。
+   * 未启用/路径为空/文件不存在时返回 null，由调用方回退默认内容。
+   */
+  private async getTemplateContent(
+    enabled: boolean,
+    path: string,
+    vars: { title: string; dateMoment: QdnMoment; week?: string }
+  ): Promise<string | null> {
+    if (!enabled) return null;
+    const trimmed = path.trim();
+    if (!trimmed) return null;
+    const file = this.app.vault.getAbstractFileByPath(normalizePath(trimmed));
+    if (!(file instanceof TFile)) {
+      new Notice(`模板文件不存在，已使用默认内容：${trimmed}`);
+      return null;
+    }
+    try {
+      let content = await this.app.vault.cachedRead(file);
+      const timeStr = moment().format("HH:mm");
+      content = content
+        .replace(/\{\{title\}\}/g, vars.title)
+        .replace(
+          /\{\{date:([^}]*)\}\}/g,
+          (_match: string, fmt: string) => vars.dateMoment.format(fmt)
+        )
+        .replace(/\{\{date\}\}/g, vars.dateMoment.format(this.settings.dateFormat))
+        .replace(/\{\{week\}\}/g, vars.week ?? "")
+        .replace(/\{\{time\}\}/g, timeStr);
+      return content;
+    } catch (e) {
+      console.warn("Quick Daily Note: 读取模板失败", e);
+      new Notice("模板读取失败，已使用默认内容");
+      return null;
+    }
   }
 
   /**
@@ -2640,7 +2802,18 @@ export default class QuickDailyNotePlugin extends Plugin {
       return;
     }
 
-    const file = await this.app.vault.create(filePath, `# ${title}\n`);
+    const parsedDate = moment(date, this.settings.dateFormat, true);
+    const initialContent =
+      (await this.getTemplateContent(
+        this.settings.dailyTemplateEnabled,
+        this.settings.dailyTemplatePath,
+        {
+          title,
+          dateMoment: parsedDate.isValid() ? parsedDate : moment(),
+        }
+      )) ?? `# ${title}\n`;
+
+    const file = await this.app.vault.create(filePath, initialContent);
     // 创建后自动记录当天天气（异步，失败不影响创建）
     void this.appendWeatherToNote(file);
     void this.app.workspace.getLeaf(false).openFile(file);
@@ -2795,6 +2968,24 @@ export default class QuickDailyNotePlugin extends Plugin {
    * 生成本周回顾：汇总本周日记、完成/未完成待办与统计，插入当前笔记光标处。
    */
   async generateWeeklyReview() {
+    await this.insertWeeklyReview(
+      moment().startOf("isoWeek"),
+      moment().endOf("isoWeek"),
+      true
+    );
+  }
+
+  /** 生成选定周的回顾（day 为该周任意一天，由选周弹窗调用） */
+  async generateWeeklyReviewFor(day: QdnMoment) {
+    const start = day.clone().startOf("isoWeek");
+    await this.insertWeeklyReview(start, start.clone().endOf("isoWeek"), false);
+  }
+
+  /**
+   * 汇总某一周（isoWeek）的日记、完成/未完成待办与统计，插入当前笔记光标处。
+   * 本周保持原有「本周回顾」标题，其余周用「2026-W37 回顾」。
+   */
+  private async insertWeeklyReview(start: QdnMoment, end: QdnMoment, isCurrent: boolean) {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     const editor = view?.editor;
     if (!editor) {
@@ -2802,10 +2993,9 @@ export default class QuickDailyNotePlugin extends Plugin {
       return;
     }
 
-    const start = moment().startOf("isoWeek");
-    const end = moment().endOf("isoWeek");
+    const heading = isCurrent ? "本周回顾" : `${start.format("GGGG-[W]WW")} 回顾`;
     const lines: string[] = [];
-    lines.push(`## 本周回顾（${start.format("M月D日")} ~ ${end.format("M月D日")}）`);
+    lines.push(`## ${heading}（${start.format("M月D日")} ~ ${end.format("M月D日")}）`);
     lines.push("");
 
     // 日记汇总
@@ -2839,8 +3029,10 @@ export default class QuickDailyNotePlugin extends Plugin {
       const dateStr = d.format(this.settings.dateFormat);
       const dateLabel = d.format("MM-DD dddd");
       for (const item of this.settings.todos[dateStr] ?? []) {
-        if (item.done) doneLines.push(`- [x] ${item.text}（${dateLabel}）`);
-        else pendingLines.push(`- [ ] ${item.text}（${dateLabel}）`);
+        // 多行待办压平成单行，避免拆断 markdown 复选框行
+        const flat = item.text.replace(/\s*\n+\s*/g, " / ");
+        if (item.done) doneLines.push(`- [x] ${flat}（${dateLabel}）`);
+        else pendingLines.push(`- [ ] ${flat}（${dateLabel}）`);
       }
     }
     lines.push(`### 待办完成（${doneLines.length} 项）`);
@@ -2855,7 +3047,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     const prefix = line.slice(0, cursor.ch).trim() ? "\n" : "";
     const suffix = line.slice(cursor.ch).trim() ? "\n" : "";
     editor.replaceSelection(`${prefix}${text}${suffix}`);
-    new Notice("已插入本周回顾");
+    new Notice(`已插入${heading}`);
   }
 
   /** 获取指定城市当天天气（Open-Meteo，无需 API key），失败返回 null */
@@ -2889,7 +3081,17 @@ export default class QuickDailyNotePlugin extends Plugin {
     try {
       const content = await this.app.vault.read(file);
       const lines = content.split("\n");
-      lines.splice(1, 0, `> ${weather}`);
+      // 模板可能带 frontmatter：天气引用行插到 frontmatter 之后（无 frontmatter 则保持在第一行后）
+      let insertAt = 1;
+      if (lines[0]?.trim() === "---") {
+        for (let i = 1; i < lines.length; i++) {
+          if (lines[i]?.trim() === "---") {
+            insertAt = i + 1;
+            break;
+          }
+        }
+      }
+      lines.splice(insertAt, 0, `> ${weather}`);
       await this.app.vault.modify(file, lines.join("\n"));
     } catch (e) {
       console.warn("Quick Daily Note: 写入天气失败", e);
@@ -3239,11 +3441,14 @@ class CalendarView extends ItemView {
     });
 
     const grid = wrapper.createDiv("qdn-cal-grid");
+    // 第 1 列：周记列（W，每行行首，对应该行所在周）；连续竖向分隔线由 .qdn-cal-grid::after 绘制
+    grid.createDiv("qdn-cal-cell qdn-cal-weekday").setText("W");
     for (const weekday of ["一", "二", "三", "四", "五", "六", "日"]) {
       grid.createDiv("qdn-cal-cell qdn-cal-weekday").setText(weekday);
     }
 
     const diarySet = this.plugin.getDiaryDateSet();
+    const weeklySet = this.plugin.getWeeklyKeySet();
     const todayStr = moment().format(this.plugin.settings.dateFormat);
     const dateFormat = this.plugin.settings.dateFormat;
     const gridStart = this.viewMoment
@@ -3251,28 +3456,44 @@ class CalendarView extends ItemView {
       .startOf("month")
       .startOf("isoWeek");
 
-    for (let i = 0; i < 42; i++) {
-      const day = gridStart.clone().add(i, "day");
-      const dateStr = day.format(dateFormat);
-      const cell = grid.createDiv("qdn-cal-cell");
-      cell.setText(day.date().toString());
+    for (let row = 0; row < 6; row++) {
+      const monday = gridStart.clone().add(row * 7, "day");
+      const weekKey = monday.format("GGGG-[W]WW");
+      const mondayStr = monday.format(dateFormat);
 
-      if (day.month() !== this.viewMoment.month()) {
-        cell.addClass("qdn-cal-outside");
+      // 周记格在行首（日历左侧）：单击不改变日历选中与待办列表（周记不属于任何一天），
+      // 双击打开/创建该周的周记（2026-W37 周记）。格内只显示本周 ISO 周号数字（去前导零）
+      const weekCell = grid.createDiv("qdn-cal-cell qdn-cal-week-cell");
+      weekCell.setText(monday.format("WW").replace(/^0/, ""));
+      weekCell.setAttr("aria-label", `${weekKey} 周记（双击打开/创建）`);
+      if (weeklySet.has(weekKey)) weekCell.createSpan("qdn-cal-dot");
+      weekCell.addEventListener("dblclick", () => {
+        void this.plugin.openOrCreateWeeklyNote(weekKey, mondayStr);
+      });
+
+      for (let col = 0; col < 7; col++) {
+        const day = monday.clone().add(col, "day");
+        const dateStr = day.format(dateFormat);
+        const cell = grid.createDiv("qdn-cal-cell");
+        cell.setText(day.date().toString());
+
+        if (day.month() !== this.viewMoment.month()) {
+          cell.addClass("qdn-cal-outside");
+        }
+        if (dateStr === todayStr) cell.addClass("qdn-cal-today");
+        if (dateStr === this.selectedDate) cell.addClass("qdn-cal-selected");
+        if (diarySet.has(dateStr)) cell.createSpan("qdn-cal-dot");
+
+        cell.addEventListener("click", () => {
+          // 单击仅切换选中日期与待办列表，不打开日记
+          this.selectedDate = dateStr;
+          this.render();
+        });
+        cell.addEventListener("dblclick", () => {
+          // 双击打开/创建该日日记
+          void this.plugin.openOrCreateDailyNote(dateStr);
+        });
       }
-      if (dateStr === todayStr) cell.addClass("qdn-cal-today");
-      if (dateStr === this.selectedDate) cell.addClass("qdn-cal-selected");
-      if (diarySet.has(dateStr)) cell.createSpan("qdn-cal-dot");
-
-      cell.addEventListener("click", () => {
-        // 单击仅切换选中日期与待办列表，不打开日记
-        this.selectedDate = dateStr;
-        this.render();
-      });
-      cell.addEventListener("dblclick", () => {
-        // 双击打开/创建该日日记
-        void this.plugin.openOrCreateDailyNote(dateStr);
-      });
     }
 
     this.renderStats(wrapper);
@@ -3436,17 +3657,20 @@ class CalendarView extends ItemView {
         });
 
         if (this.editingIndex === index) {
-            row.addClass("qdn-todo-editing");
-          // 编辑状态：渲染输入框，回车保存、Esc 取消、失焦保存
-          const input = row.createEl("input", {
-            type: "text",
+          row.addClass("qdn-todo-editing");
+          // 编辑状态：多行文本框，Enter 保存、Shift+Enter 换行、Esc 取消、失焦保存
+          const input = row.createEl("textarea", {
             cls: "qdn-todo-edit-input",
+            attr: { rows: "1" },
           });
           input.value = item.text;
+          autosizeTextarea(input);
+          input.addEventListener("input", () => autosizeTextarea(input));
           input.addEventListener("keydown", (evt) => {
-            if (evt.key === "Enter") {
+            if (evt.isComposing) return;
+            if (evt.key === "Enter" && !evt.shiftKey) {
               evt.preventDefault();
-                void this.plugin.updateTodoText(this.selectedDate, index, input.value);
+              void this.plugin.updateTodoText(this.selectedDate, index, input.value);
               this.editingIndex = null;
               this.render();
             } else if (evt.key === "Escape") {
@@ -3461,7 +3685,9 @@ class CalendarView extends ItemView {
           });
           window.setTimeout(() => {
             input.focus();
-            input.select();
+            // 多行内容不再全选，光标定位到末尾便于续写
+            const end = input.value.length;
+            input.setSelectionRange(end, end);
           }, 0);
         } else {
           const text = row.createDiv("qdn-todo-text");
@@ -3515,15 +3741,17 @@ class CalendarView extends ItemView {
     if (Platform.isMobile) return;
 
     const inputRow = wrapper.createDiv("qdn-todo-add");
-    const input = inputRow.createEl("input", {
-      type: "text",
-      placeholder: "添加待办，回车确认",
+    const input = inputRow.createEl("textarea", {
+      attr: { rows: "1", placeholder: "添加待办，回车确认，Shift+Enter 换行" },
     });
+    input.addEventListener("input", () => autosizeTextarea(input));
     input.addEventListener("keydown", (evt) => {
-      if (evt.key === "Enter") {
+      if (evt.isComposing) return;
+      if (evt.key === "Enter" && !evt.shiftKey) {
         evt.preventDefault();
         void this.plugin.addTodo(this.selectedDate, input.value);
         input.value = "";
+        autosizeTextarea(input);
       }
     });
     inputRow
@@ -3531,8 +3759,15 @@ class CalendarView extends ItemView {
       .addEventListener("click", () => {
         void this.plugin.addTodo(this.selectedDate, input.value);
         input.value = "";
+        autosizeTextarea(input);
       });
   }
+}
+
+/** textarea 高度自适应内容（多行待办输入/编辑用）；+2px 补偿上下 1px 边框，避免出现 1px 滚动条 */
+function autosizeTextarea(el: HTMLTextAreaElement) {
+  el.style.height = `${0}px`;
+  el.style.height = `${el.scrollHeight + 2}px`;
 }
 
 /** 新增待办弹窗（移动端）：回车连续添加，Esc 关闭 */
@@ -3549,20 +3784,22 @@ class AddTodoModal extends Modal {
   onOpen() {
     this.titleEl.setText(`新增待办 · ${this.dateStr}`);
     this.contentEl.addClass("qdn-add-todo-modal");
-    const input = this.contentEl.createEl("input", {
-      type: "text",
-      placeholder: "输入待办内容，回车连续添加",
+    const input = this.contentEl.createEl("textarea", {
+      cls: "qdn-add-todo-input",
+      attr: { rows: "1", placeholder: "输入待办内容，回车连续添加，Shift+Enter 换行" },
     });
-    input.addClass("qdn-add-todo-input");
     const submit = () => {
       const value = input.value.trim();
       if (!value) return;
       void this.plugin.addTodo(this.dateStr, value);
       input.value = "";
+      autosizeTextarea(input);
       input.focus();
     };
+    input.addEventListener("input", () => autosizeTextarea(input));
     input.addEventListener("keydown", (evt) => {
-      if (evt.key === "Enter") {
+      if (evt.isComposing) return;
+      if (evt.key === "Enter" && !evt.shiftKey) {
         evt.preventDefault();
         submit();
       }
@@ -3577,6 +3814,46 @@ class AddTodoModal extends Modal {
 
   onClose() {
     this.contentEl.empty();
+  }
+}
+
+/** 选周弹窗：为最近 12 周（含本周）的任意一周生成回顾 */
+class WeekReviewModal extends SuggestModal<QdnMoment> {
+  private plugin: QuickDailyNotePlugin;
+
+  constructor(app: App, plugin: QuickDailyNotePlugin) {
+    super(app);
+    this.plugin = plugin;
+    this.setPlaceholder("选择要生成回顾的周（可输入周号或日期搜索）…");
+    this.limit = 20;
+  }
+
+  /** 含本周在内最近 12 周（周一为一周起点），可按周号（如 W37）或日期搜索 */
+  getSuggestions(query: string): QdnMoment[] {
+    const weeks: QdnMoment[] = [];
+    for (let i = 0; i < 12; i++) {
+      weeks.push(moment().subtract(i, "week").startOf("isoWeek"));
+    }
+    const q = query.trim().toLowerCase();
+    if (!q) return weeks;
+    return weeks.filter(
+      (w) =>
+        w.format("GGGG-[W]WW").toLowerCase().includes(q) ||
+        w.format("YYYY-MM-DD").includes(q)
+    );
+  }
+
+  renderSuggestion(week: QdnMoment, el: HTMLElement): void {
+    const start = week.clone().startOf("isoWeek");
+    const end = start.clone().endOf("isoWeek");
+    const current = start.format("GGGG-[W]WW") === moment().format("GGGG-[W]WW");
+    el.createDiv({
+      text: `${start.format("GGGG-[W]WW")}（${start.format("M月D日")} ~ ${end.format("M月D日")}）${current ? " · 本周" : ""}`,
+    });
+  }
+
+  async onChooseSuggestion(week: QdnMoment): Promise<void> {
+    await this.plugin.generateWeeklyReviewFor(week);
   }
 }
 
@@ -4224,22 +4501,24 @@ class MermaidZoomModal extends Modal {
   }
 }
 
-/** 库内图片/视频文件选择弹窗：搜索并选择背景文件 */
-class ImageFileSuggestModal extends SuggestModal<TFile> {
+/** 库内文件选择弹窗：按扩展名过滤（背景图片/视频、Markdown 模板等），搜索并选择 */
+class FileSuggestModal extends SuggestModal<TFile> {
   private files: TFile[];
   private onPick: (path: string) => void;
 
-  constructor(app: App, onPick: (path: string) => void) {
+  constructor(
+    app: App,
+    extensions: string[],
+    placeholder: string,
+    onPick: (path: string) => void
+  ) {
     super(app);
     this.onPick = onPick;
+    const exts = new Set(extensions.map((e) => e.toLowerCase()));
     this.files = app.vault
       .getFiles()
-      .filter(
-        (f) =>
-          IMAGE_EXTENSIONS.has(f.extension.toLowerCase()) ||
-          VIDEO_EXTENSIONS.has(f.extension.toLowerCase()),
-      );
-    this.setPlaceholder("搜索库内图片/视频文件…");
+      .filter((f) => exts.has(f.extension.toLowerCase()));
+    this.setPlaceholder(placeholder);
     this.limit = 50;
   }
 
@@ -4264,6 +4543,10 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
   plugin: QuickDailyNotePlugin;
   /** 背景图片路径输入框引用（选择图片后回填） */
   private bgPathText: TextComponent | null = null;
+  /** 日记模板文件路径输入框引用（选择文件后回填） */
+  private dailyTemplateText: TextComponent | null = null;
+  /** 周记模板文件路径输入框引用（选择文件后回填） */
+  private weeklyTemplateText: TextComponent | null = null;
 
   constructor(app: App, plugin: QuickDailyNotePlugin) {
     super(app, plugin);
@@ -4351,6 +4634,78 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
             this.plugin.settings.dateFormat = value.trim() || "YYYY-MM-DD";
             await this.plugin.saveSettings();
           })
+      );
+
+    new Setting(containerEl).setName("模板").setHeading();
+
+    new Setting(containerEl)
+      .setName("启用日记模板")
+      .setDesc("创建日记时用模板文件内容代替默认的一级标题。支持占位符：{{title}} 笔记标题、{{date}} 日期、{{time}} 时间、{{date:YYYY-MM-DD}} 指定格式的日期。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.dailyTemplateEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.dailyTemplateEnabled = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("日记模板文件")
+      .setDesc("vault 内相对路径的 Markdown 文件，可点击右侧按钮从库内选择。")
+      .addText((text) => {
+        this.dailyTemplateText = text;
+        text
+          .setPlaceholder("模板/日记模板.md")
+          .setValue(this.plugin.settings.dailyTemplatePath)
+          .onChange(async (value) => {
+            this.plugin.settings.dailyTemplatePath = value.trim();
+            await this.plugin.saveSettings();
+          });
+      })
+      .addButton((btn) =>
+        btn.setButtonText("选择文件").setCta().onClick(() => {
+          new FileSuggestModal(this.app, ["md"], "搜索库内 Markdown 文件…", (path) => {
+            this.plugin.settings.dailyTemplatePath = path;
+            void this.plugin.saveSettings();
+            this.dailyTemplateText?.setValue(path);
+          }).open();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("启用周记模板")
+      .setDesc("创建周记（双击日历「周记」列）时套用模板文件内容。额外支持 {{week}} 周标识（如 2026-W37），{{date}} 为该周周一的日期。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.weeklyTemplateEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.weeklyTemplateEnabled = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("周记模板文件")
+      .setDesc("vault 内相对路径的 Markdown 文件，可点击右侧按钮从库内选择。")
+      .addText((text) => {
+        this.weeklyTemplateText = text;
+        text
+          .setPlaceholder("模板/周记模板.md")
+          .setValue(this.plugin.settings.weeklyTemplatePath)
+          .onChange(async (value) => {
+            this.plugin.settings.weeklyTemplatePath = value.trim();
+            await this.plugin.saveSettings();
+          });
+      })
+      .addButton((btn) =>
+        btn.setButtonText("选择文件").setCta().onClick(() => {
+          new FileSuggestModal(this.app, ["md"], "搜索库内 Markdown 文件…", (path) => {
+            this.plugin.settings.weeklyTemplatePath = path;
+            void this.plugin.saveSettings();
+            this.weeklyTemplateText?.setValue(path);
+          }).open();
+        })
       );
 
     new Setting(containerEl).setName("功能开关").setHeading();
@@ -4469,7 +4824,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("快捷复制整行（Alt+点击）")
-      .setDesc("开启后，按住 Alt 并左键点击任意一行即可复制整行内容，无需手动再选中：实时预览/编辑器中复制光标所在源码行，阅读视图中复制点击所在的段落/标题/列表项文本。普通点击不受影响，任务复选框仍正常切换；行内代码区域 Alt+点击仍优先复制代码本身。")
+      .setDesc("开启后，按住 Alt 并左键点击任意一行即可复制整行内容，无需手动再选中：实时预览/编辑器中复制光标所在源码行，阅读视图中复制点击所在的段落/标题/列表项文本，代码块中的行按点击位置定位（保留缩进）。普通点击不受影响，任务复选框仍正常切换；行内代码区域 Alt+点击仍优先复制代码本身。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.copyLineClickEnabled)
@@ -4590,12 +4945,17 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
       })
       .addButton((btn) =>
         btn.setButtonText("选择图片").setCta().onClick(() => {
-          new ImageFileSuggestModal(this.app, (path) => {
-            this.plugin.settings.bgImagePath = path;
-            void this.plugin.saveSettings();
-            this.plugin.applyBackground();
-            this.bgPathText?.setValue(path);
-          }).open();
+          new FileSuggestModal(
+            this.app,
+            [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS],
+            "搜索库内图片/视频文件…",
+            (path) => {
+              this.plugin.settings.bgImagePath = path;
+              void this.plugin.saveSettings();
+              this.plugin.applyBackground();
+              this.bgPathText?.setValue(path);
+            }
+          ).open();
         })
       );
 
@@ -4831,7 +5191,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
     ]);
 
     addSection("周回顾与统计", [
-      "命令「生成本周回顾」将本周日记（篇目、天数、字数）与完成/未完成待办汇总为 Markdown，插入当前笔记光标处。",
+      "命令「生成本周回顾」将本周日记（篇目、天数、字数）与完成/未完成待办汇总为 Markdown，插入当前笔记光标处；命令「生成选定周的回顾」可先从最近 12 周（含本周）中选择要回顾的周。",
       "日历下方显示本月日记天数、连续写日记天数、今日字数统计。",
     ]);
 

@@ -456,6 +456,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.syncStatusEl.addEventListener("click", () => void this.syncManager?.syncNow("manual"));
     this.syncManager = new SyncManager(this.app, this.syncState, {
       getFolder: () => this.settings.folder,
+      getVaultName: () => this.app.vault.getName(),
       persist: () => this.saveLocalData(),
       onStatus: (kind, detail) => this.updateSyncStatus(kind, detail),
     });
@@ -4616,8 +4617,6 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
   private dailyTemplateText: TextComponent | null = null;
   /** 周记模板文件路径输入框引用（选择文件后回填） */
   private weeklyTemplateText: TextComponent | null = null;
-  /** 同步令牌格式告警已提示过（输入变回合法前不再重复提示） */
-  private syncTokenWarned = false;
 
   constructor(app: App, plugin: QuickDailyNotePlugin) {
     super(app, plugin);
@@ -5247,26 +5246,28 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("同步令牌")
-      .setDesc("在服务端登录后为仓库签发的 dst_ 令牌（建议一台设备一枚），不是登录用的 accessToken。令牌只保存在本机 data.json，不随库同步；撤销后需重新签发并更新。")
+      .setName("账号")
+      .setDesc("daily-sync 服务端账号（与网页端登录同一套用户名密码）。只保存在本机 data.json，不随库同步。")
       .addText((text) =>
         text
-          .setPlaceholder("dst_…")
-          .setValue(this.plugin.syncState.token)
+          .setPlaceholder("用户名")
+          .setValue(this.plugin.syncState.username)
           .onChange(async (value) => {
-            const cleaned = stripQuotes(value.trim());
-            if (cleaned && !cleaned.startsWith("dst_") && !this.syncTokenWarned) {
-              this.syncTokenWarned = true;
-              new Notice(
-                cleaned.startsWith("eyJ")
-                  ? "云同步：这是登录用的 accessToken，不是同步令牌。同步令牌需在服务端为仓库签发，以 dst_ 开头"
-                  : "云同步：同步令牌应以 dst_ 开头，请检查是否复制完整",
-                6000,
-              );
-            } else if (cleaned.startsWith("dst_")) {
-              this.syncTokenWarned = false;
-            }
-            this.plugin.syncState.token = cleaned;
+            this.plugin.syncState.username = stripQuotes(value.trim());
+            await this.plugin.saveLocalData();
+            this.plugin.syncManager?.onConfigChanged();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("密码")
+      .setDesc("服务端登录密码。插件登录换取访问令牌（有效期约 2 小时，到期用 refresh 令牌自动续期，无需反复输入密码）。")
+      .addText((text) =>
+        text
+          .setPlaceholder("密码")
+          .setValue(this.plugin.syncState.password)
+          .onChange(async (value) => {
+            this.plugin.syncState.password = value;
             await this.plugin.saveLocalData();
             this.plugin.syncManager?.onConfigChanged();
           })
@@ -5296,7 +5297,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
         : "从未同步";
       syncStatusSetting.setDesc(
         `上次同步：${time}；游标 v${s.cursor}；已同步 ${Object.keys(s.hashes).length} 个文件。` +
-          (s.serverUrl && s.token ? "" : "（尚未配置地址与令牌）")
+          (s.serverUrl && s.username && s.password ? "" : "（尚未配置地址与账号密码）")
       );
     };
     refreshSyncDesc();

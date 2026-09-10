@@ -1,6 +1,7 @@
 /**
  * M3 headless 集成测试：把 sync.ts 打包后接 obsidian 桩，驱动真实 SyncManager
  * 逻辑直连本地 daily-sync 后端，覆盖双设备同步的完整生命周期。
+ * M5.1：鉴权改为账号密码登录换 JWT（Bearer），云端仓库按 vault 参数自动创建。
  *
  * 运行：node scripts/run-sync-test.mjs（需后端已在本机 8080 端口运行）
  */
@@ -16,8 +17,9 @@ const root = path.resolve(__dirname, "..");
 const testBuild = path.join(root, ".test-build");
 
 const BASE = process.env.SYNC_TEST_BASE || "http://localhost:8080";
-const USERNAME = "shuiyi";
-const PASSWORD = "yourPassword123";
+// 自建测试账号（注册即登录），不依赖库里已有用户；跑完由人工/清理脚本删除
+const USERNAME = `plugtest_${Date.now()}`;
+const PASSWORD = "PlugTest-2026";
 
 // sync.ts 用到 window.setTimeout 等 Node 下不存在的全局
 globalThis.window = globalThis;
@@ -64,7 +66,8 @@ const stub = require_(path.join(testBuild, "node_modules", "obsidian", "stub.cjs
 // 测试用假 vault（内存文件表 + 事件）
 // ------------------------------------------------------------
 class FakeVault {
-  constructor() {
+  constructor(name) {
+    this.name = name; // 模拟 Obsidian 库名（M5.1：同步按它定位云端仓库）
     this.files = new Map();
     this.folders = new Set();
     this.trashed = [];
@@ -131,6 +134,7 @@ function makeManager(vault, state) {
   const statuses = [];
   const host = {
     getFolder: () => "日记",
+    getVaultName: () => vault.name,
     persist: async () => {},
     onStatus: (kind, detail) => statuses.push({ kind, detail }),
   };
@@ -138,16 +142,22 @@ function makeManager(vault, state) {
   return { manager, statuses };
 }
 
-function freshState(token, extra = {}) {
-  return normalizeSyncState({ serverUrl: BASE, token, enabled: true, scope: "folder", ...extra });
+function freshState(extra = {}) {
+  return normalizeSyncState({
+    serverUrl: BASE,
+    username: USERNAME,
+    password: PASSWORD,
+    enabled: true,
+    scope: "folder",
+    ...extra,
+  });
 }
 
 // ------------------------------------------------------------
-// 后端准备：登录 -> 建仓库 -> 签两枚令牌
+// 后端准备：登录（仓库不再手动创建，由首次同步按 vault 名自动建）
 // ------------------------------------------------------------
-async function api(method, url, { token, jwt, body } = {}) {
+async function api(method, url, { jwt, body } = {}) {
   const headers = { "Content-Type": "application/json" };
-  if (token) headers["X-Sync-Token"] = token;
   if (jwt) headers["Authorization"] = `Bearer ${jwt}`;
   const res = await fetch(BASE + url, {
     method,
@@ -158,23 +168,13 @@ async function api(method, url, { token, jwt, body } = {}) {
   return { status: res.status, json };
 }
 
-console.log("== 准备：登录 / 建仓库 / 签发令牌 ==");
-const login = await api("POST", "/api/v1/auth/login", { body: { username: USERNAME, password: PASSWORD } });
-assert(login.status === 200 && login.json?.code === 0, "登录成功");
-const AT = login.json.data.accessToken;
+console.log("== 准备：注册测试账号（注册即登录）==");
+const reg = await api("POST", "/api/v1/auth/register", { body: { username: USERNAME, password: PASSWORD } });
+assert(reg.status === 200 && reg.json?.code === 0, `注册 ${USERNAME}`);
+const AT = reg.json.data.accessToken;
 
 const vaultName = `plugtest-${Date.now()}`;
-const createVault = await api("POST", "/api/v1/vaults", { jwt: AT, body: { name: vaultName } });
-assert(createVault.status === 200 && createVault.json?.code === 0, `创建仓库 ${vaultName}`);
-const vaultId = createVault.json.data.id;
-
-const [tokenAres, tokenBres] = await Promise.all([
-  api("POST", `/api/v1/vaults/${vaultId}/tokens`, { jwt: AT, body: { name: "test-a" } }),
-  api("POST", `/api/v1/vaults/${vaultId}/tokens`, { jwt: AT, body: { name: "test-b" } }),
-]);
-const TOKEN_A = tokenAres.json.data.token;
-const TOKEN_B = tokenBres.json.data.token;
-assert(TOKEN_A.startsWith("dst_") && TOKEN_B.startsWith("dst_"), "签发两枚同步令牌");
+const vaultQ = encodeURIComponent(vaultName);
 
 async function serverRecords(since = 0) {
   // 按后端分页规则翻页拉全（path 去重取最新版本）
@@ -182,7 +182,7 @@ async function serverRecords(since = 0) {
   let cursor = since;
   let vaultVersion = since;
   for (;;) {
-    const res = await api("GET", `/api/v1/sync?since=${cursor}&limit=500`, { token: TOKEN_A });
+    const res = await api("GET", `/api/v1/sync?vault=${vaultQ}&since=${cursor}&limit=500`, { jwt: AT });
     const data = res.json.data;
     for (const r of data.records) byPath.set(r.path, r);
     vaultVersion = Math.max(vaultVersion, data.vaultVersion);
@@ -193,22 +193,24 @@ async function serverRecords(since = 0) {
 }
 async function serverVersion() {
   const res = await api("GET", "/api/v1/vaults", { jwt: AT });
-  return res.json.data.find((v) => v.id === vaultId).version;
+  return res.json.data.find((v) => v.name === vaultName).version;
 }
 
 // ------------------------------------------------------------
-// 场景 1：设备 A 首次同步（本地既有日记全量上传；范围外文件不上传）
+// 场景 1：设备 A 首次同步（本地既有日记全量上传；仓库自动创建；范围外文件不上传）
 // ------------------------------------------------------------
-console.log("== 场景 1：首次同步上传（含范围过滤）==");
-const vaultA = new FakeVault();
+console.log("== 场景 1：首次同步上传（自动建仓 + 范围过滤）==");
+const vaultA = new FakeVault(vaultName);
 vaultA.rawSet("日记/2026-09-10.md", "# 今日\n- 写 M3 集成测试");
 vaultA.rawSet("日记/2026-09-09 灵感.md", "# 灵感\n防抖推送");
 vaultA.rawSet("其他/readme.md", "# 不在同步范围");
-const stateA = freshState(TOKEN_A);
+const stateA = freshState();
 const A = makeManager(vaultA, stateA);
 A.manager.start();
 await A.manager.syncNow("startup");
 
+const vaultList = await api("GET", "/api/v1/vaults", { jwt: AT });
+assert(vaultList.json.data.some((v) => v.name === vaultName), `仓库 ${vaultName} 已按库名自动创建`);
 let remote = await serverRecords();
 assert(
   remote.records.length === 2 && remote.records.some((r) => r.path === "日记/2026-09-10.md"),
@@ -222,6 +224,7 @@ await A.manager.syncNow("interval");
 const v2 = await serverVersion();
 assert(v1 === v2, "无变化的重同步是 no-op（版本不推进）");
 assert(stateA.cursor === v2, "第二次同步后游标推进到仓库版本");
+assert(stateA.refreshToken !== "", "登录拿到的 refreshToken 已存入设备状态");
 
 // ------------------------------------------------------------
 // 场景 2：本地修改 -> 防抖推送
@@ -234,11 +237,11 @@ const modified = remote.records.find((r) => r.path === "日记/2026-09-10.md");
 assert(modified.content.includes("防抖"), "修改已推送到服务器");
 
 // ------------------------------------------------------------
-// 场景 3：设备 B 首次拉取
+// 场景 3：设备 B 首次拉取（同账号另一台设备，登录换自己的令牌对）
 // ------------------------------------------------------------
 console.log("== 场景 3：设备 B 全量拉取 ==");
-const vaultB = new FakeVault();
-const stateB = freshState(TOKEN_B);
+const vaultB = new FakeVault(vaultName);
+const stateB = freshState();
 const B = makeManager(vaultB, stateB);
 B.manager.start();
 await B.manager.syncNow("startup");
@@ -310,8 +313,8 @@ await A2.manager.syncNow("manual");
 remote = await serverRecords(0);
 const liveCount = remote.records.filter((r) => !r.deleted).length;
 assert(liveCount === 521, `服务器共 521 条活记录（当前 ${liveCount}，另有墓碑 ${remote.records.length - liveCount} 条）`);
-const vaultD = new FakeVault();
-const stateD = freshState(TOKEN_B);
+const vaultD = new FakeVault(vaultName);
+const stateD = freshState();
 const D = makeManager(vaultD, stateD);
 D.manager.start();
 await D.manager.syncNow("startup");
@@ -319,16 +322,16 @@ assert(vaultD.files.size === 521, `新设备一次同步拉全 521 条（当前 
 assert(stateD.cursor === remote.vaultVersion, "D 游标推进到仓库版本");
 
 // ------------------------------------------------------------
-// 场景 8：无效令牌
+// 场景 8：账号密码错误
 // ------------------------------------------------------------
-console.log("== 场景 8：无效令牌 ==");
+console.log("== 场景 8：账号密码错误 ==");
 stub.Notice.log.length = 0;
-const vaultE = new FakeVault();
-const E = makeManager(vaultE, freshState("dst_deadbeef"));
+const vaultE = new FakeVault(vaultName);
+const E = makeManager(vaultE, freshState({ password: "wrong-password" }));
 E.manager.start();
 await E.manager.syncNow("startup");
 assert(E.statuses.some((s) => s.kind === "error"), "状态进入 error");
-assert(stub.Notice.log.some((m) => m.includes("令牌无效或已撤销")), "401 有明确提示");
+assert(stub.Notice.log.some((m) => m.includes("账号或密码错误")), "401 有明确提示");
 
 // ------------------------------------------------------------
 A2.manager.destroy();

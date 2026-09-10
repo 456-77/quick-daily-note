@@ -3,10 +3,13 @@ import { App, EventRef, Notice, TAbstractFile, TFile, requestUrl } from "obsidia
 /**
  * 云同步（daily-sync 服务）客户端。
  *
- * 协议（与后端 M2 实现一一对应）：
- * - 推送 POST /api/v1/sync：批量幂等上传（≤200 条/批，单条 ≤1MB，服务端按内容哈希判重）
- * - 拉取 GET /api/v1/sync?since=&limit=：按仓库版本号增量；删除以墓碑（deleted=true）下发
- * - 鉴权：X-Sync-Token 头，dst_ 开头的设备令牌（一台设备一枚，撤销立即 401）
+ * 协议（与后端 M2/M5.1 实现一一对应）：
+ * - 推送 POST /api/v1/sync?vault=：批量幂等上传（≤200 条/批，单条 ≤1MB，服务端按内容哈希判重）
+ * - 拉取 GET /api/v1/sync?vault=&since=&limit=：按仓库版本号增量；删除以墓碑（deleted=true）下发
+ * - 仓库：vault 参数填本库（Obsidian vault）名字，服务端按用户名下同名牌查找、不存在自动创建
+ * - 鉴权（M5.1）：用账号密码登录换 accessToken（JWT，约 2 小时），请求带 Authorization: Bearer；
+ *   401 时先用手头的 refreshToken 换新对（一次性轮换），refresh 也失效才用账号密码重新登录。
+ *   refreshToken 随同步状态持久化到 data.json，Obsidian 重启无需重新登录
  *
  * 同步状态（游标 + 每个文件上次同步的内容哈希）是每设备独立的，
  * 存在插件本地 data.json 中，不写入库内（避免被同步、被其他设备覆盖）。
@@ -19,8 +22,10 @@ import { App, EventRef, Notice, TAbstractFile, TFile, requestUrl } from "obsidia
 export interface SyncDeviceState {
   /** 后端地址，如 http://120.26.58.22:8080 */
   serverUrl: string;
-  /** dst_ 同步令牌 */
-  token: string;
+  /** 服务端账号（与 Web 登录同一套用户体系） */
+  username: string;
+  /** 服务端密码（仅本机 data.json，不写入库内文件） */
+  password: string;
   /** 自动同步开关（关闭后仅命令/按钮手动触发） */
   enabled: boolean;
   /** 推送范围：folder=日记文件夹，vault=整个库（均限 .md 且排除点开头目录） */
@@ -31,16 +36,20 @@ export interface SyncDeviceState {
   hashes: Record<string, string>;
   /** 上次成功同步的时间戳（ms），0=从未 */
   lastSyncAt: number;
+  /** 服务端签发的 refreshToken（30 天滚动轮换），用于静默续期 accessToken */
+  refreshToken: string;
 }
 
 export const DEFAULT_SYNC_STATE: SyncDeviceState = {
   serverUrl: "",
-  token: "",
+  username: "",
+  password: "",
   enabled: false,
   scope: "folder",
   cursor: 0,
   hashes: {},
   lastSyncAt: 0,
+  refreshToken: "",
 };
 
 /**
@@ -58,6 +67,8 @@ export type SyncStatusKind = "off" | "syncing" | "ok" | "error";
 export interface SyncHost {
   /** 日记文件夹设置（同步范围 scope=folder 时的前缀），空串表示库根目录 */
   getFolder(): string;
+  /** 当前 Obsidian 库名（服务端按它定位/自动创建同名云端仓库） */
+  getVaultName(): string;
   /** 持久化同步状态到本机 data.json */
   persist(): Promise<void>;
   /** 状态栏等 UI 回调 */
@@ -85,10 +96,10 @@ interface RemoteRecord {
   version: number;
 }
 
-/** 401：令牌无效或已撤销（提示用户去设置里更新，别当成网络错误重试轰炸） */
+/** 401：账号密码被拒 / refresh 失效且登录失败（提示用户去设置里更新，别当成网络错误重试轰炸） */
 class SyncAuthError extends Error {
   constructor() {
-    super("同步令牌无效或已撤销");
+    super("账号或密码错误");
   }
 }
 
@@ -119,6 +130,8 @@ export class SyncManager {
   private disposed = false;
   /** 错误 Notice 去重：同一错误只提示一次，成功后复位 */
   private lastErrorNotice = "";
+  /** 内存中的 accessToken（JWT，约 2 小时有效）；丢了/过期重新走 refresh→登录 */
+  private accessToken: string | null = null;
 
   constructor(app: App, state: SyncDeviceState, host: SyncHost) {
     this.app = app;
@@ -126,9 +139,13 @@ export class SyncManager {
     this.host = host;
   }
 
-  /** 服务端地址与令牌都已配置 */
+  /** 服务端地址与账号密码都已配置 */
   get configured(): boolean {
-    return this.state.serverUrl.trim() !== "" && this.state.token.trim() !== "";
+    return (
+      this.state.serverUrl.trim() !== "" &&
+      this.state.username.trim() !== "" &&
+      this.state.password !== ""
+    );
   }
 
   /** 注册文件钩子与周期定时器（插件 onload 时调用） */
@@ -202,7 +219,7 @@ export class SyncManager {
     if (this.disposed) return;
     if (!this.configured) {
       this.refreshStatus();
-      if (trigger === "manual") new Notice("云同步：请先在插件设置中填写服务端地址与同步令牌");
+      if (trigger === "manual") new Notice("云同步：请先在插件设置中填写服务端地址与账号密码");
       return;
     }
     if (this.syncing) {
@@ -465,9 +482,13 @@ export class SyncManager {
   }
 
   // ------------------------------------------------------------
-  // HTTP
+  // HTTP 与鉴权
   // ------------------------------------------------------------
 
+  /**
+   * 调同步接口：自动带 Bearer accessToken；401（过期/失效）时强制换新令牌后重试一次，
+   * 仍 401 才视为账号密码有问题。所有 api 调用都在 syncing 锁内串行，无并发抢号问题。
+   */
   private async api<T = unknown>(
     method: "GET" | "POST",
     since?: number,
@@ -475,27 +496,104 @@ export class SyncManager {
   ): Promise<T> {
     let base = this.state.serverUrl.trim().replace(/\/+$/, "");
     if (!/^https?:\/\//i.test(base)) base = "http://" + base;
+    const vault = encodeURIComponent(this.host.getVaultName());
     const url =
-      method === "GET" ? `${base}/api/v1/sync?since=${since}&limit=${PULL_LIMIT}` : `${base}/api/v1/sync`;
-    let res;
-    try {
-      res = await requestUrl({
-        url,
-        method,
-        headers: { "Content-Type": "application/json", "X-Sync-Token": this.state.token.trim() },
-        body: method === "POST" ? JSON.stringify(body) : undefined,
-        throw: false,
-      });
-    } catch (err) {
-      throw new Error(`无法连接同步服务器（${String(err)}）`);
+      method === "GET"
+        ? `${base}/api/v1/sync?vault=${vault}&since=${since}&limit=${PULL_LIMIT}`
+        : `${base}/api/v1/sync?vault=${vault}`;
+
+    let res = await this.request(url, method, await this.ensureAccessToken(), body);
+    if (res.status === 401) {
+      res = await this.request(url, method, await this.ensureAccessToken(true), body);
+      if (res.status === 401) throw new SyncAuthError();
     }
-    if (res.status === 401) throw new SyncAuthError();
     if (res.status !== 200) throw new Error(`服务器返回 HTTP ${res.status}`);
     const json = res.json as { code?: number; message?: string; data?: T } | undefined;
     if (!json || json.code !== 0 || json.data === undefined) {
       throw new Error((json && json.message) || "响应格式错误");
     }
     return json.data;
+  }
+
+  /** 单次 HTTP 请求（不解释业务状态码） */
+  private async request(
+    url: string,
+    method: "GET" | "POST",
+    accessToken: string,
+    body?: unknown,
+  ): Promise<{ status: number; json: unknown }> {
+    try {
+      const res = await requestUrl({
+        url,
+        method,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+        body: method === "POST" ? JSON.stringify(body) : undefined,
+        throw: false,
+      });
+      return { status: res.status, json: res.json };
+    } catch (err) {
+      throw new Error(`无法连接同步服务器（${String(err)}）`);
+    }
+  }
+
+  /**
+   * 拿可用的 accessToken：
+   * 有缓存直接用；force（401 后）或无缓存时先试 refreshToken 换新对
+   * （服务端一次性轮换，旧 refresh 立即作废），refresh 不可用（过期/作废/网络异常）
+   * 一律落到账号密码登录——登录被拒才是真正的凭证问题，抛 SyncAuthError。
+   * 轮换出的新 refreshToken 即刻持久化，防中途退出丢失。
+   */
+  private async ensureAccessToken(force = false): Promise<string> {
+    if (!force && this.accessToken) return this.accessToken;
+    if (this.state.refreshToken) {
+      try {
+        const data = await this.tokenRequest("/api/v1/auth/refresh", {
+          refreshToken: this.state.refreshToken,
+        });
+        this.applyTokenPair(data);
+        return this.accessToken!;
+      } catch {
+        // refresh 已过期/被轮换作废（或暂时连不上——登录请求会给出真实原因）
+        this.state.refreshToken = "";
+      }
+    }
+    const data = await this.tokenRequest("/api/v1/auth/login", {
+      username: this.state.username.trim(),
+      password: this.state.password,
+    });
+    this.applyTokenPair(data);
+    return this.accessToken!;
+  }
+
+  /** 登录/刷新接口的裸请求：非 200 一律按服务端 message 抛错，401 视为凭证问题 */
+  private async tokenRequest(path: string, payload: unknown): Promise<TokenPairData> {
+    let base = this.state.serverUrl.trim().replace(/\/+$/, "");
+    if (!/^https?:\/\//i.test(base)) base = "http://" + base;
+    let res;
+    try {
+      res = await requestUrl({
+        url: `${base}${path}`,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        throw: false,
+      });
+    } catch (err) {
+      throw new Error(`无法连接同步服务器（${String(err)}）`);
+    }
+    const json = res.json as { code?: number; message?: string; data?: TokenPairData } | undefined;
+    if (res.status === 401 || (json && json.code === 401)) throw new SyncAuthError();
+    if (res.status !== 200 || !json || json.code !== 0 || !json.data) {
+      throw new Error((json && json.message) || `登录接口返回 HTTP ${res.status}`);
+    }
+    return json.data;
+  }
+
+  /** 记下新的令牌对；refreshToken 落 state（同步周期结束统一持久化，此处再兜底刷一次盘） */
+  private applyTokenPair(data: TokenPairData): void {
+    this.accessToken = data.accessToken;
+    this.state.refreshToken = data.refreshToken;
+    void this.host.persist().catch(() => {});
   }
 
   // ------------------------------------------------------------
@@ -513,7 +611,7 @@ export class SyncManager {
     const key = isAuth ? "auth" : err instanceof Error ? err.message : String(err);
     if (key === this.lastErrorNotice) return;
     this.lastErrorNotice = key;
-    new Notice(isAuth ? "云同步失败：令牌无效或已撤销，请在插件设置中更新" : `云同步失败：${key}`);
+    new Notice(isAuth ? "云同步失败：账号或密码错误，请在插件设置中更新" : `云同步失败：${key}`);
   }
 }
 
@@ -522,4 +620,11 @@ interface SyncPullData {
   vaultVersion: number;
   hasMore: boolean;
   records: RemoteRecord[];
+}
+
+/** 登录/刷新响应（与后端 TokenResponse 对应；refreshToken 一次性轮换） */
+interface TokenPairData {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
 }

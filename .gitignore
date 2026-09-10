@@ -4,3 +4,4 @@ main.js
 .link-test.mjs
 deploy-vaults.mjs
 .mimosa/
+.test-build/

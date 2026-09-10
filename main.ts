@@ -25,6 +25,7 @@ import {
   normalizePath,
 } from "obsidian";
 import { detectLanguage } from "./languageDetect";
+import { SyncDeviceState, SyncManager, SyncStatusKind, normalizeSyncState } from "./sync";
 
 /**
  * moment 类型兜底：obsidian 的 moment re-export 在部分审核环境（新版
@@ -329,6 +330,14 @@ export default class QuickDailyNotePlugin extends Plugin {
     private cursorHistory = new Map<string, CursorSnapshot[]>();
     /** 各文件最近一次记录的光标，用于识别大幅跳转 */
     private lastCursors = new Map<string, EditorPosition>();
+  /** 云同步状态（每设备独立，持久化在本地 data.json 的 sync 键） */
+  syncState: SyncDeviceState = normalizeSyncState(undefined);
+  /** 本地 data.json 的原始内容（背景设置 + 同步状态等设备独立数据） */
+  private localData: Record<string, unknown> = {};
+  /** 云同步管理器（loadSettings 成功后创建；设置页需要触发同步） */
+  syncManager: SyncManager | null = null;
+  /** 状态栏同步指示元素 */
+  private syncStatusEl: HTMLElement | null = null;
 
   async onload() {
     await this.loadSettings();
@@ -352,6 +361,18 @@ export default class QuickDailyNotePlugin extends Plugin {
     });
 
     this.updateHeadingCommand();
+
+    this.addCommand({
+      id: "sync-now",
+      name: "立即云同步",
+      callback: () => void this.syncManager?.syncNow("manual"),
+    });
+
+    this.addCommand({
+      id: "sync-full-repull",
+      name: "重置同步游标并全量拉取",
+      callback: () => this.syncManager?.resetCursorAndSync(),
+    });
 
     this.addCommand({
       id: "generate-weekly-review",
@@ -420,10 +441,26 @@ export default class QuickDailyNotePlugin extends Plugin {
 
     this.setupReminderTimer();
 
+    // 云同步：状态栏指示 + 事件钩子；布局就绪后延迟首次同步
+    this.syncStatusEl = this.addStatusBarItem();
+    this.syncStatusEl.addClass("mod-clickable");
+    this.syncStatusEl.style.display = "none";
+    this.syncStatusEl.addEventListener("click", () => void this.syncManager?.syncNow("manual"));
+    this.syncManager = new SyncManager(this.app, this.syncState, {
+      getFolder: () => this.settings.folder,
+      persist: () => this.saveLocalData(),
+      onStatus: (kind, detail) => this.updateSyncStatus(kind, detail),
+    });
+    this.syncManager.start();
+    this.app.workspace.onLayoutReady(() => this.syncManager?.beginStartupSync());
+
     this.addSettingTab(new QuickDailyNoteSettingTab(this.app, this));
   }
 
   onunload() {
+    this.syncManager?.destroy();
+    this.syncManager = null;
+    this.syncStatusEl = null;
     this.imageObserver?.disconnect();
     this.imageObserver = null;
     document.removeEventListener("mouseover", this.handleCodeBlockHover);
@@ -489,8 +526,10 @@ export default class QuickDailyNotePlugin extends Plugin {
   async loadSettings() {
     const vaultState = await this.readVaultState();
     const local = (await this.loadData()) as
-      | (Partial<QuickDailyNoteSettings> & { bgLocalVersion?: number })
+      | (Partial<QuickDailyNoteSettings> & { bgLocalVersion?: number; sync?: Partial<SyncDeviceState> })
       | null;
+    this.localData = (local as Record<string, unknown> | null) ?? {};
+    this.syncState = normalizeSyncState(local?.sync);
     if (vaultState) {
       // 库内文件优先（跨设备同步的唯一数据源）
       this.settings = Object.assign({}, DEFAULT_SETTINGS, vaultState);
@@ -506,7 +545,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     // 首次迁移时以当前背景值播种本地 data.json 并打标（此后本地为权威，各设备独立）
     await this.writeVaultState();
     await this.removeLegacyStateFile();
-    await this.saveLocalBackgroundSettings();
+    await this.saveLocalData();
     // 隐藏文件开关以 Obsidian 全局配置为准（插件开关是全局设置的镜像）
     this.settings.showHiddenFiles = !!this.vaultConfig().getConfig("showHiddenFiles");
     // 监听库内状态文件变化：其他设备经同步写入后自动重载
@@ -533,13 +572,35 @@ export default class QuickDailyNotePlugin extends Plugin {
     }
   }
 
-  /** 把背景设置写入本地 data.json（每设备独立，不随库同步；bgLocalVersion 标记迁移完成） */
-  private async saveLocalBackgroundSettings(): Promise<void> {
-    const local: Record<string, unknown> = { bgLocalVersion: 1 };
+  /** 把背景设置与云同步状态写入本地 data.json（每设备独立，不随库同步；bgLocalVersion 标记迁移完成） */
+  async saveLocalData(): Promise<void> {
+    const local: Record<string, unknown> = { ...this.localData, bgLocalVersion: 1, sync: this.syncState };
     for (const key of QuickDailyNotePlugin.DEVICE_LOCAL_KEYS) {
       local[key] = this.settings[key];
     }
+    this.localData = local;
     await this.saveData(local);
+  }
+
+  /** 状态栏同步指示（off 隐藏；syncing/ok/error 显示对应状态，title 携带详情） */
+  private updateSyncStatus(kind: SyncStatusKind, detail?: string): void {
+    const el = this.syncStatusEl;
+    if (!el) return;
+    if (kind === "off") {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "";
+    el.title = detail || "点击立即同步";
+    if (kind === "syncing") {
+      el.setText("⟳ 同步中");
+    } else if (kind === "ok") {
+      const t = new Date();
+      const hh = `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
+      el.setText(`✓ 已同步 ${hh}`);
+    } else {
+      el.setText("⚠ 同步失败");
+    }
   }
 
   /**
@@ -613,7 +674,7 @@ export default class QuickDailyNotePlugin extends Plugin {
   async saveSettings() {
     // 共享配置写库内同步文件；背景设置每设备独立，写本地 data.json
     await this.writeVaultState();
-    await this.saveLocalBackgroundSettings();
+    await this.saveLocalData();
   }
 
   /** 是否已注册"设置标题等级"命令 */
@@ -5144,6 +5205,91 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
               "这是一封来自 Quick Daily Note 的测试邮件。如果你收到了它，说明邮件通知配置成功。"
             );
           })
+      );
+
+    new Setting(containerEl).setName("云同步（daily-sync 服务）").setHeading();
+
+    new Setting(containerEl)
+      .setName("启用云同步")
+      .setDesc("开启后启动时、每 5 分钟自动同步，本地修改后约 3 秒自动推送；也可用命令「立即云同步」或点击状态栏指示手动触发。删除按墓碑同步到其他设备（移入本地回收站），冲突时保留本地版本并重新上传。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.syncState.enabled)
+          .onChange(async (value) => {
+            this.plugin.syncState.enabled = value;
+            await this.plugin.saveLocalData();
+            this.plugin.syncManager?.onConfigChanged();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("服务端地址")
+      .setDesc("daily-sync 后端地址（自建服务），如 http://120.26.58.22:8080")
+      .addText((text) =>
+        text
+          .setPlaceholder("http://your-server:8080")
+          .setValue(this.plugin.syncState.serverUrl)
+          .onChange(async (value) => {
+            this.plugin.syncState.serverUrl = value.trim();
+            await this.plugin.saveLocalData();
+            this.plugin.syncManager?.onConfigChanged();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("同步令牌")
+      .setDesc("在服务端登录后为仓库签发的 dst_ 令牌（建议一台设备一枚）。令牌只保存在本机 data.json，不随库同步；撤销后需重新签发并更新。")
+      .addText((text) =>
+        text
+          .setPlaceholder("dst_…")
+          .setValue(this.plugin.syncState.token)
+          .onChange(async (value) => {
+            this.plugin.syncState.token = value.trim();
+            await this.plugin.saveLocalData();
+            this.plugin.syncManager?.onConfigChanged();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("同步范围")
+      .setDesc("「日记文件夹」只同步上方存放位置内的 .md 文件；「整个库」同步库内所有 .md 文件（.obsidian 等点开头目录除外）。云端已有的文件始终会被拉取到本地，不受此范围限制。")
+      .addDropdown((drop) =>
+        drop
+          .addOption("folder", "日记文件夹")
+          .addOption("vault", "整个库")
+          .setValue(this.plugin.syncState.scope)
+          .onChange(async (value) => {
+            this.plugin.syncState.scope = value as "folder" | "vault";
+            await this.plugin.saveLocalData();
+          })
+      );
+
+    const syncStatusSetting = new Setting(containerEl)
+      .setName("手动同步")
+      .setDesc("");
+    const refreshSyncDesc = () => {
+      const s = this.plugin.syncState;
+      const time = s.lastSyncAt
+        ? new Date(s.lastSyncAt).toLocaleString()
+        : "从未同步";
+      syncStatusSetting.setDesc(
+        `上次同步：${time}；游标 v${s.cursor}；已同步 ${Object.keys(s.hashes).length} 个文件。` +
+          (s.serverUrl && s.token ? "" : "（尚未配置地址与令牌）")
+      );
+    };
+    refreshSyncDesc();
+    syncStatusSetting
+      .addButton((btn) =>
+        btn.setButtonText("立即同步").setCta().onClick(async () => {
+          await this.plugin.syncManager?.syncNow("manual");
+          refreshSyncDesc();
+        })
+      )
+      .addButton((btn) =>
+        btn.setButtonText("重置并全量拉取").onClick(async () => {
+          this.plugin.syncManager?.resetCursorAndSync();
+          refreshSyncDesc();
+        })
       );
 
     new Setting(containerEl).setName("使用说明").setHeading();

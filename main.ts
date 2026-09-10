@@ -276,6 +276,14 @@ function getI18n(): typeof I18N.zh {
   return isZh ? I18N.zh : I18N.en;
 }
 
+/** 去掉整对包裹的引号（从终端/文档复制令牌时常见） */
+function stripQuotes(s: string): string {
+  if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+
 /** 图片扩展名集合（用于定位图片文件） */
 const IMAGE_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif", "ico", "tiff",
@@ -4608,6 +4616,8 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
   private dailyTemplateText: TextComponent | null = null;
   /** 周记模板文件路径输入框引用（选择文件后回填） */
   private weeklyTemplateText: TextComponent | null = null;
+  /** 同步令牌格式告警已提示过（输入变回合法前不再重复提示） */
+  private syncTokenWarned = false;
 
   constructor(app: App, plugin: QuickDailyNotePlugin) {
     super(app, plugin);
@@ -5230,7 +5240,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
           .setPlaceholder("http://your-server:8080")
           .setValue(this.plugin.syncState.serverUrl)
           .onChange(async (value) => {
-            this.plugin.syncState.serverUrl = value.trim();
+            this.plugin.syncState.serverUrl = stripQuotes(value.trim());
             await this.plugin.saveLocalData();
             this.plugin.syncManager?.onConfigChanged();
           })
@@ -5238,13 +5248,25 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("同步令牌")
-      .setDesc("在服务端登录后为仓库签发的 dst_ 令牌（建议一台设备一枚）。令牌只保存在本机 data.json，不随库同步；撤销后需重新签发并更新。")
+      .setDesc("在服务端登录后为仓库签发的 dst_ 令牌（建议一台设备一枚），不是登录用的 accessToken。令牌只保存在本机 data.json，不随库同步；撤销后需重新签发并更新。")
       .addText((text) =>
         text
           .setPlaceholder("dst_…")
           .setValue(this.plugin.syncState.token)
           .onChange(async (value) => {
-            this.plugin.syncState.token = value.trim();
+            const cleaned = stripQuotes(value.trim());
+            if (cleaned && !cleaned.startsWith("dst_") && !this.syncTokenWarned) {
+              this.syncTokenWarned = true;
+              new Notice(
+                cleaned.startsWith("eyJ")
+                  ? "云同步：这是登录用的 accessToken，不是同步令牌。同步令牌需在服务端为仓库签发，以 dst_ 开头"
+                  : "云同步：同步令牌应以 dst_ 开头，请检查是否复制完整",
+                6000,
+              );
+            } else if (cleaned.startsWith("dst_")) {
+              this.syncTokenWarned = false;
+            }
+            this.plugin.syncState.token = cleaned;
             await this.plugin.saveLocalData();
             this.plugin.syncManager?.onConfigChanged();
           })

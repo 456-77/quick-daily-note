@@ -1255,3 +1255,8 @@ body.is-mobile .qdn-calendar {
   margin-top: 10px;
 }
 
+/* 状态栏同步指示的显隐（用类控制，避免直接写内联 style.display） */
+.qdn-sync-hidden {
+  display: none;
+}
+

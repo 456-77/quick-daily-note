@@ -452,7 +452,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     // 云同步：状态栏指示 + 事件钩子；布局就绪后延迟首次同步
     this.syncStatusEl = this.addStatusBarItem();
     this.syncStatusEl.addClass("mod-clickable");
-    this.syncStatusEl.style.display = "none";
+    this.syncStatusEl.addClass("qdn-sync-hidden");
     this.syncStatusEl.addEventListener("click", () => void this.syncManager?.syncNow("manual"));
     this.syncManager = new SyncManager(this.app, this.syncState, {
       getFolder: () => this.settings.folder,
@@ -540,7 +540,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     const local = (await this.loadData()) as
       | (Partial<QuickDailyNoteSettings> & { bgLocalVersion?: number; sync?: Partial<SyncDeviceState> })
       | null;
-    this.localData = (local as Record<string, unknown> | null) ?? {};
+    this.localData = local ?? {};
     this.syncState = normalizeSyncState(local?.sync);
     if (vaultState) {
       // 库内文件优先（跨设备同步的唯一数据源）
@@ -599,10 +599,10 @@ export default class QuickDailyNotePlugin extends Plugin {
     const el = this.syncStatusEl;
     if (!el) return;
     if (kind === "off") {
-      el.style.display = "none";
+      el.addClass("qdn-sync-hidden");
       return;
     }
-    el.style.display = "";
+    el.removeClass("qdn-sync-hidden");
     el.title = detail || "点击立即同步";
     if (kind === "syncing") {
       el.setText("⟳ 同步中");
@@ -3959,8 +3959,8 @@ class WeekReviewModal extends SuggestModal<QdnMoment> {
     });
   }
 
-  async onChooseSuggestion(week: QdnMoment): Promise<void> {
-    await this.plugin.generateWeeklyReviewFor(week);
+  onChooseSuggestion(week: QdnMoment): void {
+    void this.plugin.generateWeeklyReviewFor(week);
   }
 }
 

@@ -81,6 +81,9 @@ const PUSH_DEBOUNCE_MS = 3000;
 const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 /** 启动后延迟首同步，等 Obsidian 索引与界面就绪 */
 const STARTUP_DELAY_MS = 5000;
+/** 待办数据文件的固定路径（库根）。它不是 .md，但要在云同步里单独放行，供 Web 端读取 */
+export const TODO_SYNC_PATH = "daily-sync-todos.json";
+
 /** 服务端限制：单批 ≤200 条 */
 const MAX_BATCH = 200;
 /** 服务端限制：单条内容 ≤1MB（按 Java String 长度，即 UTF-16 代码单元数） */
@@ -277,7 +280,7 @@ export class SyncManager {
   private schedulePush(path: string, op: "mod" | "del", ignoreScope = false): void {
     if (!this.state.enabled || !this.configured) return;
     if (this.applyingRemote > 0) return;
-    if (!path.endsWith(".md")) return;
+    if (!path.endsWith(".md") && path !== TODO_SYNC_PATH) return;
     if (!ignoreScope && !this.inScope(path)) return;
     this.dirty.set(path, op);
     this.armFlushTimer();
@@ -304,6 +307,8 @@ export class SyncManager {
 
   /** path 是否在推送范围内（.md、非点开头目录；scope=folder 时还需落在日记文件夹内） */
   inScope(path: string): boolean {
+    // 待办数据文件固定在库根，不受「日记文件夹」范围限制，需单独放行
+    if (path === TODO_SYNC_PATH) return true;
     if (!path.endsWith(".md")) return false;
     if (path.split("/").some((seg) => seg.startsWith("."))) return false;
     if (this.state.scope === "vault") return true;
@@ -321,6 +326,12 @@ export class SyncManager {
       if (!this.inScope(file.path)) continue;
       const hash = await sha256Hex(await this.app.vault.read(file));
       if (this.state.hashes[file.path] !== hash) this.dirty.set(file.path, "mod");
+    }
+    // 待办数据文件是 json，getMarkdownFiles() 扫不到，单独补一次
+    const todoFile = this.app.vault.getAbstractFileByPath(TODO_SYNC_PATH);
+    if (todoFile instanceof TFile) {
+      const hash = await sha256Hex(await this.app.vault.read(todoFile));
+      if (this.state.hashes[todoFile.path] !== hash) this.dirty.set(todoFile.path, "mod");
     }
   }
 

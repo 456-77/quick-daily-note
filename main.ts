@@ -25,7 +25,7 @@ import {
   normalizePath,
 } from "obsidian";
 import { detectLanguage } from "./languageDetect";
-import { SyncDeviceState, SyncManager, SyncStatusKind, normalizeSyncState } from "./sync";
+import { SyncDeviceState, SyncManager, SyncStatusKind, TODO_SYNC_PATH, normalizeSyncState } from "./sync";
 
 /**
  * moment 类型兜底：obsidian 的 moment re-export 在部分审核环境（新版
@@ -346,6 +346,8 @@ export default class QuickDailyNotePlugin extends Plugin {
   syncManager: SyncManager | null = null;
   /** 状态栏同步指示元素 */
   private syncStatusEl: HTMLElement | null = null;
+  /** 待办导出防抖定时器 */
+  private todosExportTimer: number | null = null;
 
   async onload() {
     await this.loadSettings();
@@ -462,6 +464,8 @@ export default class QuickDailyNotePlugin extends Plugin {
     });
     this.syncManager.start();
     this.app.workspace.onLayoutReady(() => this.syncManager?.beginStartupSync());
+    // 确保待办数据文件存在且最新（升级插件后不必先改一次待办才会生成）
+    this.app.workspace.onLayoutReady(() => void this.exportTodosForSync());
 
     this.addSettingTab(new QuickDailyNoteSettingTab(this.app, this));
   }
@@ -3015,7 +3019,44 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.settings.todos[fromDate] = items.filter((i) => i.done);
     await this.saveSettings();
     this.refreshViews();
+    this.scheduleTodosExport();
     return pending.length;
+  }
+
+  /**
+   * 把待办导出到库根 daily-sync-todos.json，供网页版查看。
+   *
+   * 为什么另存一份而不是直接同步库内的 quick-daily-note.json：那份文件里还混着
+   * emailAccessKey 等配置，整份上传等于把凭据送到服务端、再经接口回到浏览器。
+   * 这里只导出待办本身；防抖合并连续勾选/编辑，避免每次点一下都写盘。
+   */
+  private scheduleTodosExport(): void {
+    if (this.todosExportTimer !== null) window.clearTimeout(this.todosExportTimer);
+    this.todosExportTimer = window.setTimeout(() => {
+      this.todosExportTimer = null;
+      void this.exportTodosForSync();
+    }, 1500);
+  }
+
+  /** 写出待办数据文件；内容未变时不写，避免无谓地触发一次云同步 */
+  private async exportTodosForSync(): Promise<void> {
+    try {
+      const text = JSON.stringify(
+        { version: 1, updatedAt: new Date().toISOString(), todos: this.settings.todos },
+        null,
+        2
+      );
+      const existing = this.app.vault.getAbstractFileByPath(TODO_SYNC_PATH);
+      if (existing instanceof TFile) {
+        if ((await this.app.vault.read(existing)) !== text) {
+          await this.app.vault.modify(existing, text);
+        }
+      } else {
+        await this.app.vault.create(TODO_SYNC_PATH, text);
+      }
+    } catch (e) {
+      console.warn("Quick Daily Note: 导出待办数据失败", e);
+    }
   }
 
   /** 剥离旧的遗留前缀（[昨日遗留]、叠加的多个、或旧的日期前缀），顺延时统一替换为新前缀 */
@@ -3175,6 +3216,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.settings.todos[dateStr].push({ text: trimmed, done: false });
     await this.saveSettings();
     this.refreshViews();
+    this.scheduleTodosExport();
     void this.sendEmail(`新待办（${dateStr}）`, `已添加待办：${trimmed}`);
   }
 
@@ -3184,6 +3226,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     items[index].done = !items[index].done;
     await this.saveSettings();
     this.refreshViews();
+    this.scheduleTodosExport();
   }
 
   async deleteTodo(dateStr: string, index: number) {
@@ -3192,6 +3235,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     items.splice(index, 1);
     await this.saveSettings();
     this.refreshViews();
+    this.scheduleTodosExport();
   }
 
   /** 修改待办文字内容，空文本不生效 */
@@ -3203,6 +3247,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     items[index].text = trimmed;
     await this.saveSettings();
     this.refreshViews();
+    this.scheduleTodosExport();
   }
 
    /**

@@ -73,6 +73,12 @@ export interface SyncHost {
   persist(): Promise<void>;
   /** 状态栏等 UI 回调 */
   onStatus(kind: SyncStatusKind, detail?: string): void;
+  /**
+   * 需要同步但不在库内落盘的内容（路径 -> 文本），如待办数据。
+   * 这些路径只参与推送、拉取时跳过写回：权威数据由插件自己维护，
+   * 从云端覆盖回来会破坏本地。
+   */
+  getVirtualFiles(): Record<string, string>;
 }
 
 /** 本地修改后延迟推送的静默期：防抖合并连续输入 */
@@ -81,7 +87,13 @@ const PUSH_DEBOUNCE_MS = 3000;
 const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 /** 启动后延迟首同步，等 Obsidian 索引与界面就绪 */
 const STARTUP_DELAY_MS = 5000;
-/** 待办数据文件的固定路径（库根）。它不是 .md，但要在云同步里单独放行，供 Web 端读取 */
+/**
+ * 待办数据在云端的记录路径。
+ *
+ * 它**不是库内文件**——插件把待办内容放在内存里直接推送，不往用户库里写任何东西，
+ * 这个路径只作为云端记录与网页端读取的标识（也正因如此，库里若真有同名文件
+ * 也不会被当普通文件同步，见 inScope 只放行 .md）。
+ */
 export const TODO_SYNC_PATH = "daily-sync-todos.json";
 
 /** 服务端限制：单批 ≤200 条 */
@@ -135,6 +147,8 @@ export class SyncManager {
   private lastErrorNotice = "";
   /** 内存中的 accessToken（JWT，约 2 小时有效）；丢了/过期重新走 refresh→登录 */
   private accessToken: string | null = null;
+  /** 本周期认定的虚拟文件路径（不落盘，拉取时跳过写回） */
+  private virtualPaths = new Set<string>();
 
   constructor(app: App, state: SyncDeviceState, host: SyncHost) {
     this.app = app;
@@ -195,6 +209,18 @@ export class SyncManager {
   resetCursorAndSync(): void {
     this.state.cursor = 0;
     void this.syncNow("manual");
+  }
+
+  /**
+   * 虚拟文件内容变化后调用（如待办增删改）。
+   * 它们不落盘，不会触发 vault 文件事件，所以要主动入队并走防抖推送。
+   */
+  touchVirtual(): void {
+    if (!this.state.enabled || !this.configured) return;
+    for (const path of Object.keys(this.host.getVirtualFiles())) {
+      this.dirty.set(path, "mod");
+    }
+    this.armFlushTimer();
   }
 
   /** 插件卸载：清理钩子与定时器，尽力把未发出的变更推上去 */
@@ -280,7 +306,7 @@ export class SyncManager {
   private schedulePush(path: string, op: "mod" | "del", ignoreScope = false): void {
     if (!this.state.enabled || !this.configured) return;
     if (this.applyingRemote > 0) return;
-    if (!path.endsWith(".md") && path !== TODO_SYNC_PATH) return;
+    if (!path.endsWith(".md")) return;
     if (!ignoreScope && !this.inScope(path)) return;
     this.dirty.set(path, op);
     this.armFlushTimer();
@@ -307,8 +333,6 @@ export class SyncManager {
 
   /** path 是否在推送范围内（.md、非点开头目录；scope=folder 时还需落在日记文件夹内） */
   inScope(path: string): boolean {
-    // 待办数据文件固定在库根，不受「日记文件夹」范围限制，需单独放行
-    if (path === TODO_SYNC_PATH) return true;
     if (!path.endsWith(".md")) return false;
     if (path.split("/").some((seg) => seg.startsWith("."))) return false;
     if (this.state.scope === "vault") return true;
@@ -327,11 +351,12 @@ export class SyncManager {
       const hash = await sha256Hex(await this.app.vault.read(file));
       if (this.state.hashes[file.path] !== hash) this.dirty.set(file.path, "mod");
     }
-    // 待办数据文件是 json，getMarkdownFiles() 扫不到，单独补一次
-    const todoFile = this.app.vault.getAbstractFileByPath(TODO_SYNC_PATH);
-    if (todoFile instanceof TFile) {
-      const hash = await sha256Hex(await this.app.vault.read(todoFile));
-      if (this.state.hashes[todoFile.path] !== hash) this.dirty.set(todoFile.path, "mod");
+    // 虚拟文件（待办数据）不在库里，单独比对内存内容的哈希
+    const virtual = this.host.getVirtualFiles();
+    this.virtualPaths = new Set(Object.keys(virtual));
+    for (const [path, content] of Object.entries(virtual)) {
+      const hash = await sha256Hex(content);
+      if (this.state.hashes[path] !== hash) this.dirty.set(path, "mod");
     }
   }
 
@@ -348,6 +373,18 @@ export class SyncManager {
         if (items.length >= MAX_BATCH) break;
         if (op === "del") {
           items.push({ path, content: null, deleted: true, hash: null });
+          batchPaths.push(path);
+          continue;
+        }
+        // 虚拟文件（待办数据）的内容在内存里，库里没有对应文件
+        const virtualContent = this.host.getVirtualFiles()[path];
+        if (virtualContent !== undefined) {
+          const virtualHash = await sha256Hex(virtualContent);
+          if (this.state.hashes[path] === virtualHash) {
+            this.dirty.delete(path);
+            continue;
+          }
+          items.push({ path, content: virtualContent, deleted: false, hash: virtualHash });
           batchPaths.push(path);
           continue;
         }
@@ -429,6 +466,10 @@ export class SyncManager {
 
   /** 应用单条远端记录（冲突时本地胜：保留本地并标记重推） */
   private async applyRecord(rec: RemoteRecord, conflicts: string[]): Promise<void> {
+    // 虚拟文件不落盘：权威数据由插件自己维护（如待办的本地设置），
+    // 从云端写回会覆盖本地；本地有变化时下次推送会反向覆盖云端。
+    if (this.virtualPaths.has(rec.path)) return;
+
     const file = this.app.vault.getAbstractFileByPath(rec.path);
     const knownHash = this.state.hashes[rec.path];
 

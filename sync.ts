@@ -126,6 +126,43 @@ export async function sha256Hex(content: string): Promise<string> {
     .join("");
 }
 
+/**
+ * 云端快照是否比本地新（决定要不要放弃本次推送）。
+ *
+ * 优先比较快照里的 updatedAt。本地还没有时间戳时——老版本升级上来，
+ * settings 里新增的字段是 0——退化为比较条目总数：那时无法判断谁更新，
+ * 就取保守策略，只有本地条目比云端多才认为该推（否则会拿旧数据覆盖云端）。
+ *
+ * 任何解析失败都当作「不新」：宁可多推一次，也不能让本地数据卡住推不上去。
+ */
+function isRemoteNewer(remote: string, local: string): boolean {
+  try {
+    const remoteSnap = JSON.parse(remote) as SnapshotShape;
+    const localSnap = JSON.parse(local) as SnapshotShape;
+    const remoteAt = Date.parse(remoteSnap.updatedAt ?? "");
+    const localAt = Date.parse(localSnap.updatedAt ?? "");
+    if (!Number.isNaN(remoteAt) && localAt > 0) {
+      return remoteAt > localAt;
+    }
+    return countTodos(remoteSnap.todos) >= countTodos(localSnap.todos);
+  } catch {
+    return false;
+  }
+}
+
+interface SnapshotShape {
+  updatedAt?: string;
+  todos?: Record<string, unknown[]>;
+}
+
+function countTodos(todos: Record<string, unknown[]> | undefined): number {
+  if (!todos) return 0;
+  return Object.values(todos).reduce(
+    (sum, items) => sum + (Array.isArray(items) ? items.length : 0),
+    0
+  );
+}
+
 export class SyncManager {
   private state: SyncDeviceState;
   private host: SyncHost;
@@ -149,6 +186,8 @@ export class SyncManager {
   private accessToken: string | null = null;
   /** 本周期认定的虚拟文件路径（不落盘，拉取时跳过写回） */
   private virtualPaths = new Set<string>();
+  /** 拉取到的云端虚拟文件内容，推送前用它比较新旧 */
+  private remoteVirtual = new Map<string, string>();
 
   constructor(app: App, state: SyncDeviceState, host: SyncHost) {
     this.app = app;
@@ -384,6 +423,15 @@ export class SyncManager {
             this.dirty.delete(path);
             continue;
           }
+          // 云端更新则放弃本次推送：待办快照是「整体覆盖」语义，而本机可能还没追上
+          // （库同步工具尚未把最新待办拉到本机），照推会用旧数据覆盖其他设备的新数据。
+          // 记下云端的哈希，避免每轮都重复入队重试。
+          const remote = this.remoteVirtual.get(path);
+          if (remote !== undefined && isRemoteNewer(remote, virtualContent)) {
+            this.state.hashes[path] = await sha256Hex(remote);
+            this.dirty.delete(path);
+            continue;
+          }
           items.push({ path, content: virtualContent, deleted: false, hash: virtualHash });
           batchPaths.push(path);
           continue;
@@ -467,8 +515,12 @@ export class SyncManager {
   /** 应用单条远端记录（冲突时本地胜：保留本地并标记重推） */
   private async applyRecord(rec: RemoteRecord, conflicts: string[]): Promise<void> {
     // 虚拟文件不落盘：权威数据由插件自己维护（如待办的本地设置），
-    // 从云端写回会覆盖本地；本地有变化时下次推送会反向覆盖云端。
-    if (this.virtualPaths.has(rec.path)) return;
+    // 从云端写回会覆盖本地。这里只记下云端内容，推送时用它判断谁更新。
+    if (this.virtualPaths.has(rec.path)) {
+      if (rec.deleted) this.remoteVirtual.delete(rec.path);
+      else this.remoteVirtual.set(rec.path, rec.content);
+      return;
+    }
 
     const file = this.app.vault.getAbstractFileByPath(rec.path);
     const knownHash = this.state.hashes[rec.path];

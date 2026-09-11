@@ -130,13 +130,15 @@ class FakeVault {
   }
 }
 
-function makeManager(vault, state) {
+function makeManager(vault, state, virtualFiles = {}) {
   const statuses = [];
   const host = {
     getFolder: () => "日记",
     getVaultName: () => vault.name,
     persist: async () => {},
     onStatus: (kind, detail) => statuses.push({ kind, detail }),
+    // 虚拟文件（待办数据）默认不参与；需要时由调用方注入
+    getVirtualFiles: () => virtualFiles,
   };
   const manager = new SyncManager({ vault }, state, host);
   return { manager, statuses };
@@ -332,6 +334,65 @@ E.manager.start();
 await E.manager.syncNow("startup");
 assert(E.statuses.some((s) => s.kind === "error"), "状态进入 error");
 assert(stub.Notice.log.some((m) => m.includes("账号或密码错误")), "401 有明确提示");
+
+// ------------------------------------------------------------
+// 场景 9：待办快照的冲突保护
+//   复现「设备 A 同步了新待办 → 设备 B（本地数据更旧）一同步就把它冲掉」
+// ------------------------------------------------------------
+console.log("\n== 场景 9：待办快照不被旧数据覆盖 ==");
+{
+  const todoVault = `plugtest-todo-${Date.now()}`;
+  const snap = (updatedAt, textsByDate) => {
+    const todos = {};
+    for (const [date, texts] of Object.entries(textsByDate)) {
+      todos[date] = texts.map((text) => ({ text, done: false }));
+    }
+    return JSON.stringify({ version: 1, updatedAt, todos }, null, 2);
+  };
+  const readCloud = async () => {
+    const res = await api("GET", `/api/v1/sync?vault=${encodeURIComponent(todoVault)}&since=0&limit=500`, { jwt: AT });
+    const rec = res.json.data.records.find((r) => r.path === "daily-sync-todos.json");
+    return rec ? JSON.parse(rec.content) : null;
+  };
+
+  // 设备 A：较旧的快照（1 天）
+  const oldFiles = {
+    "daily-sync-todos.json": snap("2026-01-01T00:00:00.000Z", { "2026-01-01": ["旧条目"] }),
+  };
+  const tA = new FakeVault(todoVault);
+  const todoA = makeManager(tA, freshState(), oldFiles).manager;
+  await todoA.syncNow("manual");
+  assert((await readCloud())?.todos?.["2026-01-01"]?.length === 1, "设备 A 的初始快照已上传");
+
+  // 设备 B：更新的快照（2 天）
+  const newFiles = {
+    "daily-sync-todos.json": snap("2026-01-02T00:00:00.000Z", {
+      "2026-01-01": ["旧条目"],
+      "2026-01-02": ["新条目"],
+    }),
+  };
+  const tB = new FakeVault(todoVault);
+  const todoB = makeManager(tB, freshState(), newFiles).manager;
+  await todoB.syncNow("manual");
+  assert(Object.keys((await readCloud())?.todos ?? {}).length === 2, "设备 B 的新快照已覆盖云端（2 天）");
+
+  // 设备 A 再同步：本地没变，不应动云端
+  await todoA.syncNow("manual");
+  assert(Object.keys((await readCloud())?.todos ?? {}).length === 2, "设备 A 重同步未覆盖云端");
+
+  // 关键：设备 A 的同步状态丢失（重装插件 / 清 data.json）→ 会尝试全量重推，仍不得覆盖
+  const todoA2 = makeManager(tA, freshState(), oldFiles).manager;
+  await todoA2.syncNow("manual");
+  const cloud = await readCloud();
+  assert(
+    cloud?.updatedAt === "2026-01-02T00:00:00.000Z",
+    "设备 A 状态丢失后重推也被拦下（云端仍是新快照）",
+  );
+
+  todoA.destroy();
+  todoB.destroy();
+  todoA2.destroy();
+}
 
 // ------------------------------------------------------------
 A2.manager.destroy();

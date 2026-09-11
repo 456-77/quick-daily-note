@@ -67,6 +67,15 @@ interface QuickDailyNoteSettings {
   dateFormat: string;
   /** 按日期关联的待办事项 */
   todos: Record<string, TodoItem[]>;
+  /**
+   * 待办最后一次修改时间（epoch ms）。
+   *
+   * 随库同步（存在 quick-daily-note.json），因此各设备看到的是同一个值。
+   * 云同步快照的 updatedAt 由它生成——若改用「每次生成时取当前时间」，
+   * 快照内容每轮都变，哈希永远不同，会导致插件每轮同步都推送、
+   * 进而用本机（可能落后的）待办覆盖掉其他设备的新数据。
+   */
+  todosUpdatedAt: number;
   /** 每天提醒添加待办 */
   todoReminderEnabled: boolean;
   todoReminderTime: string;
@@ -145,6 +154,7 @@ const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
   folder: "",
   dateFormat: "YYYY-MM-DD",
   todos: {},
+  todosUpdatedAt: 0,
   todoReminderEnabled: false,
   todoReminderTime: "08:00",
   checkReminderEnabled: false,
@@ -3018,7 +3028,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.settings.todos[fromDate] = items.filter((i) => i.done);
     await this.saveSettings();
     this.refreshViews();
-    this.syncManager?.touchVirtual();
+    this.markTodosChanged();
     return pending.length;
   }
 
@@ -3032,11 +3042,26 @@ export default class QuickDailyNotePlugin extends Plugin {
   private collectVirtualFiles(): Record<string, string> {
     return {
       [TODO_SYNC_PATH]: JSON.stringify(
-        { version: 1, updatedAt: new Date().toISOString(), todos: this.settings.todos },
+        {
+          version: 1,
+          // 用「待办最后修改时间」而不是当前时间：内容必须稳定，
+          // 否则哈希每轮都变，会退化成每轮同步都推、覆盖其他设备的数据
+          updatedAt: new Date(this.settings.todosUpdatedAt).toISOString(),
+          todos: this.settings.todos,
+        },
         null,
         2
       ),
     };
+  }
+
+  /**
+   * 待办发生变更后调用：打上修改时间戳并通知同步模块入队。
+   * 时间戳随库同步分发到各设备，是判断「谁的数据更新」的依据。
+   */
+  private markTodosChanged(): void {
+    this.settings.todosUpdatedAt = Date.now();
+    this.markTodosChanged();
   }
 
   /** 老实现曾把待办写成库根文件，这里清掉遗留文件（现已改为纯内存同步） */
@@ -3208,7 +3233,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.settings.todos[dateStr].push({ text: trimmed, done: false });
     await this.saveSettings();
     this.refreshViews();
-    this.syncManager?.touchVirtual();
+    this.markTodosChanged();
     void this.sendEmail(`新待办（${dateStr}）`, `已添加待办：${trimmed}`);
   }
 
@@ -3218,7 +3243,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     items[index].done = !items[index].done;
     await this.saveSettings();
     this.refreshViews();
-    this.syncManager?.touchVirtual();
+    this.markTodosChanged();
   }
 
   async deleteTodo(dateStr: string, index: number) {
@@ -3227,7 +3252,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     items.splice(index, 1);
     await this.saveSettings();
     this.refreshViews();
-    this.syncManager?.touchVirtual();
+    this.markTodosChanged();
   }
 
   /** 修改待办文字内容，空文本不生效 */
@@ -3239,7 +3264,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     items[index].text = trimmed;
     await this.saveSettings();
     this.refreshViews();
-    this.syncManager?.touchVirtual();
+    this.markTodosChanged();
   }
 
    /**

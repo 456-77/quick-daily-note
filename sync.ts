@@ -75,10 +75,16 @@ export interface SyncHost {
   onStatus(kind: SyncStatusKind, detail?: string): void;
   /**
    * 需要同步但不在库内落盘的内容（路径 -> 文本），如待办数据。
-   * 这些路径只参与推送、拉取时跳过写回：权威数据由插件自己维护，
-   * 从云端覆盖回来会破坏本地。
+   * 这些路径不写文件：内容由宿主自己维护，云端拉回来的交给
+   * {@link mergeVirtualFile} 合并。
    */
   getVirtualFiles(): Record<string, string>;
+
+  /**
+   * 拉到云端虚拟文件内容时调用，由宿主把它合并进自己的数据。
+   * 返回 true 表示本地因此有改动、需要回推云端（双向同步的关键一步）。
+   */
+  mergeVirtualFile?(path: string, content: string): boolean;
 }
 
 /** 本地修改后延迟推送的静默期：防抖合并连续输入 */
@@ -124,43 +130,6 @@ export async function sha256Hex(content: string): Promise<string> {
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-}
-
-/**
- * 云端快照是否比本地新（决定要不要放弃本次推送）。
- *
- * 优先比较快照里的 updatedAt。本地还没有时间戳时——老版本升级上来，
- * settings 里新增的字段是 0——退化为比较条目总数：那时无法判断谁更新，
- * 就取保守策略，只有本地条目比云端多才认为该推（否则会拿旧数据覆盖云端）。
- *
- * 任何解析失败都当作「不新」：宁可多推一次，也不能让本地数据卡住推不上去。
- */
-function isRemoteNewer(remote: string, local: string): boolean {
-  try {
-    const remoteSnap = JSON.parse(remote) as SnapshotShape;
-    const localSnap = JSON.parse(local) as SnapshotShape;
-    const remoteAt = Date.parse(remoteSnap.updatedAt ?? "");
-    const localAt = Date.parse(localSnap.updatedAt ?? "");
-    if (!Number.isNaN(remoteAt) && localAt > 0) {
-      return remoteAt > localAt;
-    }
-    return countTodos(remoteSnap.todos) >= countTodos(localSnap.todos);
-  } catch {
-    return false;
-  }
-}
-
-interface SnapshotShape {
-  updatedAt?: string;
-  todos?: Record<string, unknown[]>;
-}
-
-function countTodos(todos: Record<string, unknown[]> | undefined): number {
-  if (!todos) return 0;
-  return Object.values(todos).reduce(
-    (sum, items) => sum + (Array.isArray(items) ? items.length : 0),
-    0
-  );
 }
 
 export class SyncManager {
@@ -423,15 +392,8 @@ export class SyncManager {
             this.dirty.delete(path);
             continue;
           }
-          // 云端更新则放弃本次推送：待办快照是「整体覆盖」语义，而本机可能还没追上
-          // （库同步工具尚未把最新待办拉到本机），照推会用旧数据覆盖其他设备的新数据。
-          // 记下云端的哈希，避免每轮都重复入队重试。
-          const remote = this.remoteVirtual.get(path);
-          if (remote !== undefined && isRemoteNewer(remote, virtualContent)) {
-            this.state.hashes[path] = await sha256Hex(remote);
-            this.dirty.delete(path);
-            continue;
-          }
+          // 拉取阶段的 mergeVirtualFile 已经把云端内容并进本地，
+          // 所以这里推的就是合并结果（同时含两侧改动），不再需要「云端更新就跳过」
           items.push({ path, content: virtualContent, deleted: false, hash: virtualHash });
           batchPaths.push(path);
           continue;
@@ -514,11 +476,18 @@ export class SyncManager {
 
   /** 应用单条远端记录（冲突时本地胜：保留本地并标记重推） */
   private async applyRecord(rec: RemoteRecord, conflicts: string[]): Promise<void> {
-    // 虚拟文件不落盘：权威数据由插件自己维护（如待办的本地设置），
-    // 从云端写回会覆盖本地。这里只记下云端内容，推送时用它判断谁更新。
+    // 虚拟文件不落盘：内容由宿主维护。这里把云端内容交给宿主做合并
+    // （待办就是靠这条从网页端回流到 Obsidian），并保留一份用于比较。
     if (this.virtualPaths.has(rec.path)) {
-      if (rec.deleted) this.remoteVirtual.delete(rec.path);
-      else this.remoteVirtual.set(rec.path, rec.content);
+      if (rec.deleted) {
+        this.remoteVirtual.delete(rec.path);
+        return;
+      }
+      this.remoteVirtual.set(rec.path, rec.content);
+      if (this.host.mergeVirtualFile?.(rec.path, rec.content)) {
+        // 合并改动了本地 → 本轮 doFlush 会把它推回去，让其他设备也拿到合并结果
+        this.dirty.set(rec.path, "mod");
+      }
       return;
     }
 

@@ -58,8 +58,18 @@ await build({
   external: ["obsidian"],
   logLevel: "silent",
 });
+await build({
+  entryPoints: [path.join(root, "todos.ts")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  outfile: path.join(testBuild, "todos.bundle.cjs"),
+  external: ["obsidian"],
+  logLevel: "silent",
+});
 const require_ = createRequire(import.meta.url);
 const { SyncManager, normalizeSyncState } = require_(path.join(testBuild, "sync.bundle.cjs"));
+const { mergeTodos, parseSnapshot, buildSnapshot } = require_(path.join(testBuild, "todos.bundle.cjs"));
 const stub = require_(path.join(testBuild, "node_modules", "obsidian", "stub.cjs"));
 
 // ------------------------------------------------------------
@@ -336,62 +346,143 @@ assert(E.statuses.some((s) => s.kind === "error"), "状态进入 error");
 assert(stub.Notice.log.some((m) => m.includes("账号或密码错误")), "401 有明确提示");
 
 // ------------------------------------------------------------
-// 场景 9：待办快照的冲突保护
-//   复现「设备 A 同步了新待办 → 设备 B（本地数据更旧）一同步就把它冲掉」
+// 场景 9：待办容错——某台设备同步状态丢失（重装 / 清 data.json）也不丢数据
 // ------------------------------------------------------------
-console.log("\n== 场景 9：待办快照不被旧数据覆盖 ==");
+console.log("\n== 场景 9：待办状态丢失后不破坏云端 ==");
 {
   const todoVault = `plugtest-todo-${Date.now()}`;
-  const snap = (updatedAt, textsByDate) => {
-    const todos = {};
-    for (const [date, texts] of Object.entries(textsByDate)) {
-      todos[date] = texts.map((text) => ({ text, done: false }));
-    }
-    return JSON.stringify({ version: 1, updatedAt, todos }, null, 2);
-  };
-  const readCloud = async () => {
-    const res = await api("GET", `/api/v1/sync?vault=${encodeURIComponent(todoVault)}&since=0&limit=500`, { jwt: AT });
+  const now = Date.now();
+  const mkItem = (id, text) => ({ id, text, done: false, updatedAt: now });
+  const pullCloud = async () => {
+    const res = await api("GET",
+      `/api/v1/sync?vault=${encodeURIComponent(todoVault)}&since=0&limit=500`, { jwt: AT });
     const rec = res.json.data.records.find((r) => r.path === "daily-sync-todos.json");
-    return rec ? JSON.parse(rec.content) : null;
+    return rec ? parseSnapshot(rec.content) : null;
   };
 
-  // 设备 A：较旧的快照（1 天）
-  const oldFiles = {
-    "daily-sync-todos.json": snap("2026-01-01T00:00:00.000Z", { "2026-01-01": ["旧条目"] }),
+  // 设备 A：两条待办，推上去
+  let localA = { "2026-01-01": [mkItem("a1", "买牛奶"), mkItem("a2", "写周报")] };
+  const mkHost = (name, getTodos, setTodos, files) => ({
+    getFolder: () => "日记",
+    getVaultName: () => name,
+    persist: async () => {},
+    onStatus: () => {},
+    getVirtualFiles: () => {
+      files["daily-sync-todos.json"] = buildSnapshot(getTodos(), now);
+      return files;
+    },
+    mergeVirtualFile: (_p, content) => {
+      const snap = parseSnapshot(content);
+      if (!snap) return false;
+      const merged = mergeTodos(getTodos(), snap.todos);
+      if (!merged.changed) return false;
+      setTodos(merged.todos);
+      return true;
+    },
+  });
+
+  const countCloud = async () => Object.values((await pullCloud())?.todos ?? {}).flat().length;
+
+  const filesA = {};
+  const mgrA = new SyncManager({ vault: new FakeVault(todoVault) }, freshState(),
+    mkHost(todoVault, () => localA, (t) => { localA = t; }, filesA));
+  await mgrA.syncNow("manual");
+  assert((await countCloud()) === 2, `两条待办已同步到云端（当前 ${await countCloud()}）`);
+
+  // 设备 A 的同步状态丢了（重装插件 / 清掉 data.json），本地只有 a1 的旧快照
+  let localA2 = { "2026-01-01": [mkItem("a1", "买牛奶")] };
+  const filesA2 = {};
+  const mgrA2 = new SyncManager({ vault: new FakeVault(todoVault) }, freshState(),
+    mkHost(todoVault, () => localA2, (t) => { localA2 = t; }, filesA2));
+  await mgrA2.syncNow("manual");
+
+  assert(localA2["2026-01-01"].length === 2,
+    `状态丢失后同步，本地从云端补回缺失条目（当前 ${localA2["2026-01-01"].length}）`);
+  assert((await countCloud()) === 2, `云端依然是 2 条（当前 ${await countCloud()}）`);
+
+  mgrA.destroy();
+  mgrA2.destroy();
+}
+
+// ------------------------------------------------------------
+// 场景 10：待办条目级双向合并（网页端改动回流到插件）
+// ------------------------------------------------------------
+console.log("\n== 场景 10：待办条目级双向合并 ==");
+{
+  const mergeVault = `plugtest-merge-${Date.now()}`;
+  // 时间戳必须用真实时间：buildSnapshot 会把「30 天前的墓碑」当过期清掉，
+  // 用 1000/4000 这种假值会让条目被误判成过期
+  const now = Date.now();
+  // 模拟插件侧的 settings.todos（条目带 id/updatedAt）
+  let localTodos = {
+    "2026-01-01": [
+      { id: "t1", text: "买牛奶", done: false, updatedAt: now },
+      { id: "t2", text: "写周报", done: false, updatedAt: now },
+    ],
   };
-  const tA = new FakeVault(todoVault);
-  const todoA = makeManager(tA, freshState(), oldFiles).manager;
-  await todoA.syncNow("manual");
-  assert((await readCloud())?.todos?.["2026-01-01"]?.length === 1, "设备 A 的初始快照已上传");
-
-  // 设备 B：更新的快照（2 天）
-  const newFiles = {
-    "daily-sync-todos.json": snap("2026-01-02T00:00:00.000Z", {
-      "2026-01-01": ["旧条目"],
-      "2026-01-02": ["新条目"],
-    }),
+  const virtualFiles = {};
+  const host = {
+    getFolder: () => "日记",
+    getVaultName: () => mergeVault,
+    persist: async () => {},
+    onStatus: () => {},
+    getVirtualFiles: () => {
+      virtualFiles["daily-sync-todos.json"] = buildSnapshot(localTodos, now);
+      return virtualFiles;
+    },
+    // 真实插件里这个方法把云端快照合并进 settings.todos
+    mergeVirtualFile: (_p, content) => {
+      const snap = parseSnapshot(content);
+      if (!snap) return false;
+      const merged = mergeTodos(localTodos, snap.todos);
+      if (!merged.changed) return false;
+      localTodos = merged.todos;
+      return true;
+    },
   };
-  const tB = new FakeVault(todoVault);
-  const todoB = makeManager(tB, freshState(), newFiles).manager;
-  await todoB.syncNow("manual");
-  assert(Object.keys((await readCloud())?.todos ?? {}).length === 2, "设备 B 的新快照已覆盖云端（2 天）");
+  const vM = new FakeVault(mergeVault);
+  const mgr = new SyncManager({ vault: vM }, freshState(), host);
+  await mgr.syncNow("manual");
+  assert(localTodos["2026-01-01"].length === 2, "插件端首次同步上传了 2 条待办");
 
-  // 设备 A 再同步：本地没变，不应动云端
-  await todoA.syncNow("manual");
-  assert(Object.keys((await readCloud())?.todos ?? {}).length === 2, "设备 A 重同步未覆盖云端");
+  // 模拟「网页端」直接改云端：给 t2 打勾、再新增一条 t3
+  const syncUrl = `/api/v1/sync?vault=${encodeURIComponent(mergeVault)}`;
+  const webTodos = {
+    "2026-01-01": [
+      { id: "t1", text: "买牛奶", done: false, updatedAt: now },
+      { id: "t2", text: "写周报", done: true, updatedAt: now + 1000 },
+      { id: "t3", text: "网页端加的", done: false, updatedAt: now + 1000 },
+    ],
+  };
+  const webPush = await api("POST", syncUrl, {
+    jwt: AT,
+    body: { items: [{ path: "daily-sync-todos.json", content: buildSnapshot(webTodos, now + 1000) }] },
+  });
+  assert(webPush.status === 200, "网页端提交了新快照（含新增与勾选）");
 
-  // 关键：设备 A 的同步状态丢失（重装插件 / 清 data.json）→ 会尝试全量重推，仍不得覆盖
-  const todoA2 = makeManager(tA, freshState(), oldFiles).manager;
-  await todoA2.syncNow("manual");
-  const cloud = await readCloud();
+  // 插件再同步：应把网页端的改动合并进来
+  await mgr.syncNow("manual");
+  const afterMerge = localTodos["2026-01-01"];
+  assert(afterMerge.length === 3, `合并后本地 3 条（当前 ${afterMerge.length}）`);
   assert(
-    cloud?.updatedAt === "2026-01-02T00:00:00.000Z",
-    "设备 A 状态丢失后重推也被拦下（云端仍是新快照）",
+    afterMerge.map((i) => i.id).sort().join(",") === "t1,t2,t3",
+    "网页端新增的 t3 已回流到本地",
+  );
+  assert(afterMerge.find((i) => i.id === "t2")?.done === true, "网页端的勾选状态已合并到本地");
+
+  // 反向：插件端删一条，应以墓碑同步到云端
+  localTodos["2026-01-01"].find((i) => i.id === "t1").deleted = true;
+  localTodos["2026-01-01"].find((i) => i.id === "t1").updatedAt = now + 2000;
+  await mgr.syncNow("manual");
+  const pull = await api("GET", `${syncUrl}&since=0&limit=500`, { jwt: AT });
+  const cloudRec = pull.json.data.records.find((r) => r.path === "daily-sync-todos.json");
+  const cloudSnap = parseSnapshot(cloudRec.content);
+  assert(
+    cloudSnap.todos["2026-01-01"].find((i) => i.id === "t1")?.deleted === true,
+    "插件端的删除以墓碑同步到云端",
   );
 
-  todoA.destroy();
-  todoB.destroy();
-  todoA2.destroy();
+  mgr.destroy();
 }
 
 // ------------------------------------------------------------

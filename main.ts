@@ -26,6 +26,14 @@ import {
 } from "obsidian";
 import { detectLanguage } from "./languageDetect";
 import { SyncDeviceState, SyncManager, SyncStatusKind, TODO_SYNC_PATH, normalizeSyncState } from "./sync";
+import {
+  TodoItem,
+  buildSnapshot,
+  liveItems,
+  mergeTodos,
+  newTodoId,
+  parseSnapshot,
+} from "./todos";
 
 /**
  * moment 类型兜底：obsidian 的 moment re-export 在部分审核环境（新版
@@ -54,11 +62,6 @@ interface QdnMomentStatic {
 const moment: QdnMomentStatic = obsidianMoment as unknown as QdnMomentStatic;
 
 const VIEW_TYPE = "quick-daily-note-view";
-
-interface TodoItem {
-  text: string;
-  done: boolean;
-}
 
 interface QuickDailyNoteSettings {
   /** 日记存放文件夹，空字符串表示库根目录 */
@@ -359,6 +362,7 @@ export default class QuickDailyNotePlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    this.migrateTodos();
     // 等布局就绪后再应用背景，避免加载早期 vault 文件解析不完全导致误判
     this.app.workspace.onLayoutReady(() => this.applyBackground());
 
@@ -470,6 +474,7 @@ export default class QuickDailyNotePlugin extends Plugin {
       persist: () => this.saveLocalData(),
       onStatus: (kind, detail) => this.updateSyncStatus(kind, detail),
       getVirtualFiles: () => this.collectVirtualFiles(),
+      mergeVirtualFile: (path, content) => this.mergeRemoteVirtualFile(path, content),
     });
     this.syncManager.start();
     this.app.workspace.onLayoutReady(() => this.syncManager?.beginStartupSync());
@@ -3018,14 +3023,25 @@ export default class QuickDailyNotePlugin extends Plugin {
    */
   async carryOverTodos(fromDate: string, toDate: string) {
     const items = this.settings.todos[fromDate] ?? [];
-    const pending = items.filter((i) => !i.done);
+    const pending = liveItems(items).filter((i) => !i.done);
     if (pending.length === 0) return 0;
+    const now = Date.now();
     const target = this.settings.todos[toDate] ?? [];
+    // 顺延 = 源日打墓碑 + 目标日建新条目。不能把同一个 id 挪到另一天：
+    // 那样两个日期里会出现同一个 id，合并时无法判断归属。
     target.push(
-      ...pending.map((i) => ({ text: `${this.carryPrefix(fromDate)} ${this.stripCarryPrefix(i.text)}`, done: false }))
+      ...pending.map((i) => ({
+        id: newTodoId(),
+        text: `${this.carryPrefix(fromDate)} ${this.stripCarryPrefix(i.text)}`,
+        done: false,
+        updatedAt: now,
+      }))
     );
     this.settings.todos[toDate] = target;
-    this.settings.todos[fromDate] = items.filter((i) => i.done);
+    for (const item of pending) {
+      item.deleted = true;
+      item.updatedAt = now;
+    }
     await this.saveSettings();
     this.refreshViews();
     this.markTodosChanged();
@@ -3041,18 +3057,35 @@ export default class QuickDailyNotePlugin extends Plugin {
    */
   private collectVirtualFiles(): Record<string, string> {
     return {
-      [TODO_SYNC_PATH]: JSON.stringify(
-        {
-          version: 1,
-          // 用「待办最后修改时间」而不是当前时间：内容必须稳定，
-          // 否则哈希每轮都变，会退化成每轮同步都推、覆盖其他设备的数据
-          updatedAt: new Date(this.settings.todosUpdatedAt).toISOString(),
-          todos: this.settings.todos,
-        },
-        null,
-        2
-      ),
+      // buildSnapshot 会顺手清理过期墓碑、统一条目顺序；
+      // updatedAt 用「待办最后修改时间」而不是当前时间——内容必须稳定，
+      // 否则哈希每轮都变，会退化成每轮同步都推、覆盖其他设备的数据
+      [TODO_SYNC_PATH]: buildSnapshot(this.settings.todos, this.settings.todosUpdatedAt),
     };
+  }
+
+  /**
+   * 云端虚拟文件回流（双向同步的入口）。
+   *
+   * 待办走条目级合并：按 id 对齐云端与本地，取更新的那一侧，
+   * 所以网页端新增/勾选/删除的条目能回流到 Obsidian，反之亦然。
+   * 返回是否改动了本地数据——改了就要回推，让其他设备也拿到合并结果。
+   */
+  private mergeRemoteVirtualFile(path: string, content: string): boolean {
+    if (path !== TODO_SYNC_PATH) return false;
+    // 旧格式（version 1，条目没有 id）无法按条目对齐，本轮只推不拉，
+    // 等本机推上去把它覆盖成新格式
+    const snapshot = parseSnapshot(content);
+    if (!snapshot) return false;
+
+    const { todos, changed } = mergeTodos(this.settings.todos, snapshot.todos);
+    if (!changed) return false;
+
+    this.settings.todos = todos;
+    this.settings.todosUpdatedAt = Date.now();
+    void this.saveSettings();
+    this.refreshViews();
+    return true;
   }
 
   /**
@@ -3061,7 +3094,34 @@ export default class QuickDailyNotePlugin extends Plugin {
    */
   private markTodosChanged(): void {
     this.settings.todosUpdatedAt = Date.now();
-    this.markTodosChanged();
+    this.syncManager?.touchVirtual();
+  }
+
+  /**
+   * 迁移旧待办数据到 v2 结构：补齐 id 与 updatedAt。
+   *
+   * 幂等——已有 id 的条目原样保留，不删除任何数据。updatedAt 取
+   * settings.todosUpdatedAt（而不是 now）：万一某台设备的数据其实更旧，
+   * 也不至于因为「升级瞬间拿了当前时间」而在合并时压掉别的设备。
+   */
+  private migrateTodos(): void {
+    const fallbackAt = this.settings.todosUpdatedAt || 0;
+    let touched = false;
+    for (const items of Object.values(this.settings.todos)) {
+      for (const item of items) {
+        if (typeof item.id === "string" && item.id !== "") {
+          if (typeof item.updatedAt !== "number") {
+            item.updatedAt = fallbackAt;
+            touched = true;
+          }
+          continue;
+        }
+        item.id = newTodoId();
+        item.updatedAt = fallbackAt;
+        touched = true;
+      }
+    }
+    if (touched) void this.saveSettings();
   }
 
   /** 老实现曾把待办写成库根文件，这里清掉遗留文件（现已改为纯内存同步） */
@@ -3089,7 +3149,7 @@ export default class QuickDailyNotePlugin extends Plugin {
 
   /** 判断目标日期是否已包含顺延过来的待办（避免重复顺延） */
   hasCarriedOver(dateStr: string): boolean {
-    return (this.settings.todos[dateStr] ?? []).some((i) => /^\[[^\]]*遗留\]/.test(i.text));
+    return liveItems(this.settings.todos[dateStr]).some((i) => /^\[[^\]]*遗留\]/.test(i.text));
   }
 
   /**
@@ -3156,7 +3216,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     for (let d = start.clone(); d.isBefore(end) || d.isSame(end, "day"); d.add(1, "day")) {
       const dateStr = d.format(this.settings.dateFormat);
       const dateLabel = d.format("MM-DD dddd");
-      for (const item of this.settings.todos[dateStr] ?? []) {
+      for (const item of liveItems(this.settings.todos[dateStr])) {
         // 多行待办压平成单行，避免拆断 markdown 复选框行
         const flat = item.text.replace(/\s*\n+\s*/g, " / ");
         if (item.done) doneLines.push(`- [x] ${flat}（${dateLabel}）`);
@@ -3230,7 +3290,12 @@ export default class QuickDailyNotePlugin extends Plugin {
     const trimmed = text.trim();
     if (!trimmed) return;
     if (!this.settings.todos[dateStr]) this.settings.todos[dateStr] = [];
-    this.settings.todos[dateStr].push({ text: trimmed, done: false });
+    this.settings.todos[dateStr].push({
+      id: newTodoId(),
+      text: trimmed,
+      done: false,
+      updatedAt: Date.now(),
+    });
     await this.saveSettings();
     this.refreshViews();
     this.markTodosChanged();
@@ -3241,6 +3306,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     const items = this.settings.todos[dateStr];
     if (!items || !items[index]) return;
     items[index].done = !items[index].done;
+    items[index].updatedAt = Date.now();
     await this.saveSettings();
     this.refreshViews();
     this.markTodosChanged();
@@ -3249,7 +3315,9 @@ export default class QuickDailyNotePlugin extends Plugin {
   async deleteTodo(dateStr: string, index: number) {
     const items = this.settings.todos[dateStr];
     if (!items) return;
-    items.splice(index, 1);
+    // 打墓碑而不是物理移除：另一侧设备合并时看不到这条，会把它当成「新增」复活
+    items[index].deleted = true;
+    items[index].updatedAt = Date.now();
     await this.saveSettings();
     this.refreshViews();
     this.markTodosChanged();
@@ -3262,6 +3330,7 @@ export default class QuickDailyNotePlugin extends Plugin {
     const trimmed = text.trim();
     if (!trimmed) return;
     items[index].text = trimmed;
+    items[index].updatedAt = Date.now();
     await this.saveSettings();
     this.refreshViews();
     this.markTodosChanged();
@@ -3357,7 +3426,7 @@ export default class QuickDailyNotePlugin extends Plugin {
           notice.hide();
           void this.openCalendarView();
         });
-        const pendingList = (this.settings.todos[moment().format(this.settings.dateFormat)] ?? [])
+        const pendingList = liveItems(this.settings.todos[moment().format(this.settings.dateFormat)])
           .filter((item) => !item.done)
           .map((item) => `- ${item.text}`)
           .join("\n");
@@ -3372,7 +3441,7 @@ export default class QuickDailyNotePlugin extends Plugin {
   /** 统计当天日期的未完成待办数量 */
   private countTodayPendingTodos(): number {
     const todayStr = moment().format(this.settings.dateFormat);
-    return (this.settings.todos[todayStr] ?? []).filter(
+    return liveItems(this.settings.todos[todayStr]).filter(
       (item) => !item.done
     ).length;
   }
@@ -3737,7 +3806,7 @@ class CalendarView extends ItemView {
     const todayStr = moment().format(this.plugin.settings.dateFormat);
     if (this.selectedDate === todayStr) {
       const yesterdayStr = moment().subtract(1, "day").format(this.plugin.settings.dateFormat);
-      const pendingCount = (this.plugin.settings.todos[yesterdayStr] ?? []).filter(
+      const pendingCount = liveItems(this.plugin.settings.todos[yesterdayStr]).filter(
         (i) => !i.done,
       ).length;
       if (pendingCount > 0 && !this.plugin.hasCarriedOver(todayStr)) {
@@ -3751,8 +3820,12 @@ class CalendarView extends ItemView {
       }
     }
 
-    const items = this.plugin.settings.todos[this.selectedDate] ?? [];
-    const pending = items.filter((item) => !item.done).length;
+    // 保留原始下标：勾选/编辑/删除回调都靠它定位数组里的条目；
+    // 这里同时滤掉墓碑（已删除的条目不渲染）
+    const rows = (this.plugin.settings.todos[this.selectedDate] ?? [])
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => !item.deleted);
+    const pending = rows.filter(({ item }) => !item.done).length;
 
     const header = wrapper.createDiv("qdn-todos-header");
     const dateLabel = header.createDiv("qdn-todos-date");
@@ -3772,12 +3845,12 @@ class CalendarView extends ItemView {
     }
 
     const list = wrapper.createDiv("qdn-todo-list");
-    if (items.length === 0) {
+    if (rows.length === 0) {
       list.createDiv("qdn-todo-empty").setText("暂无待办，添加一条吧");
     } else {
       // 未完成排在已完成上面（组内保持原顺序），index 仍指向原始数组
-      const order = items
-        .map((item, index) => ({ item, index }))
+      const order = rows
+        .slice()
         .sort((a, b) => Number(a.item.done) - Number(b.item.done));
       for (const { item, index } of order) {
         const row = list.createDiv("qdn-todo-item");

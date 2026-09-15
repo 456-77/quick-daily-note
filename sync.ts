@@ -20,12 +20,17 @@ import { App, EventRef, Notice, TAbstractFile, TFile, requestUrl } from "obsidia
  * 冲突策略（后到者胜的客户端落地）：拉取应用时若"本地自上次同步后改过，云端也改过"，
  * 保留本地内容并重新推送（本地胜），在 Notice 中列出冲突文件。
  *
- * 附件策略（M7）：只同步**被同步范围内日记引用到的**附件（见 collectLocalAttachments），
- * 不去镜像整个库的二进制——粘贴图片的落点取决于用户配置（插件自己的 pastedImageFolder
- * 或 Obsidian 原生附件目录），盯目录必然漏，而按引用扫与落点无关。
- * 上传与下载都由引用驱动：引用着但本地缺的就去云端取（见 scanLocalAttachments），
- * 不依赖拉取流下发附件元数据——拉取有游标，用旧版插件拉过一轮的设备，游标会越过那些
- * 附件的版本号，之后增量里再也不会出现它们。
+ * 附件策略（M7）：只同步**被同步范围内日记引用到的**附件，不去镜像整个库的二进制——
+ * 粘贴图片的落点取决于用户配置（插件自己的 pastedImageFolder 或 Obsidian 原生附件目录），
+ * 盯目录必然漏，而按引用扫与落点无关。
+ *
+ * 上传与下载都由引用驱动，分两条：
+ * - 能解析到实际文件的引用（resolvedLinks）——本地已有，比对哈希后上传（见 collectLocalAttachments）；
+ * - 解析不到的引用（unresolvedLinks）——本地**没有**这个文件，按文件名去云端取回
+ *   （见 collectUnresolvedAttachments）。注意"本地缺图"只可能出现在后者里：链接能解析
+ *   就说明文件在，文件不在就说明链接解析不到，两者不会同时成立。
+ * 两者都不依赖拉取流下发附件元数据——拉取有游标，用旧版插件拉过一轮的设备，游标会越过
+ * 那些附件的版本号，之后增量里再也不会出现它们。
  */
 
 /** 每设备独立的同步配置与状态（data.json 的 sync 键） */
@@ -202,6 +207,11 @@ function hexOf(digest: ArrayBuffer): string {
     .join("");
 }
 
+/** 取路径的文件名部分 */
+function basenameOf(path: string): string {
+  return path.substring(path.lastIndexOf("/") + 1);
+}
+
 /** 取文件名部分的扩展名（小写）；目录名里的点不算 */
 function extensionOf(path: string): string {
   const dot = path.lastIndexOf(".");
@@ -245,6 +255,12 @@ export class SyncManager {
    * 它同时决定上传对象与下载对象——不在这个集合里的附件一律不同步（见文件头附件策略）。
    */
   private referencedAttachments = new Set<string>();
+  /**
+   * 本周期「日记引用着、但本地没有这个文件」的附件：文件名 -> 引用它的日记路径。
+   * 这些链接在 Obsidian 里是**解析不到**的（落在 unresolvedLinks 而不是 resolvedLinks），
+   * 所以拿不到库内路径，只能带着文件名去云端问（服务端用 X-Attachment-Path 回真实路径）。
+   */
+  private unresolvedAttachments = new Map<string, string>();
   /** 本轮已补下的附件数与字节数，受每轮上限约束 */
   private downloadedAttachments = 0;
   private downloadedAttachmentBytes = 0;
@@ -390,7 +406,12 @@ export class SyncManager {
 
   /** 防抖期结束/卸载时的推送入口（独立于 syncNow，轻量：只发不等） */
   private async flushPushes(): Promise<void> {
-    if ((this.dirty.size === 0 && this.dirtyAttachments.size === 0) || !this.configured) return;
+    if (
+      (this.dirty.size === 0 && this.dirtyAttachments.size === 0 && this.unresolvedAttachments.size === 0) ||
+      !this.configured
+    ) {
+      return;
+    }
     if (this.syncing) return; // 周期结束时会统一带上这些变更
     this.syncing = true;
     try {
@@ -458,7 +479,7 @@ export class SyncManager {
   }
 
   /**
-   * 收集「被同步范围内日记引用到的」本地附件路径。
+   * 收集「被同步范围内日记引用到的」本地附件路径（**能解析到实际文件**的那些）。
    *
    * 按引用扫而不是按目录扫：粘贴图片的落点取决于用户配置（插件自己的 pastedImageFolder，
    * 或 Obsidian 原生的附件目录——autoSavePastedImages 默认还是关的，粘贴其实走 Obsidian 设置），
@@ -476,6 +497,43 @@ export class SyncManager {
       }
     }
     return paths;
+  }
+
+  /**
+   * 收集「日记引用着、但本地还没有这个文件」的附件：文件名 -> 引用它的日记路径。
+   *
+   * <p>**这是"从云端把图拉下来"唯一的入口**，一点也绕不开：Obsidian 只把能解析到实际文件的
+   * 链接放进 resolvedLinks，本地没有这个文件时链接落在 unresolvedLinks 里（键是链接原文，
+   * 通常就是文件名）。所以"本地缺图"这件事本身，恰好只会出现在 unresolvedLinks 里。
+   * 2.9.1 只读 resolvedLinks，于是那条下载路径几乎永远走不到——链接能解析就说明文件在，
+   * 文件不在就说明链接解析不了，两者不会同时成立。
+   *
+   * @param from 带上引用它的日记路径，服务端解析同名文件时优先看这个目录（与 Obsidian 一致）
+   */
+  private collectUnresolvedAttachments(): Map<string, string> {
+    const missing = new Map<string, string>();
+    for (const md of this.app.vault.getMarkdownFiles()) {
+      if (!this.inScope(md.path)) continue;
+      const links = this.app.metadataCache?.unresolvedLinks?.[md.path];
+      if (!links) continue;
+      for (const target of Object.keys(links)) {
+        // 链接可能写成 `image/图.png` 也可能只写 `图.png`，一律按文件名去云端问
+        const name = target.substring(target.lastIndexOf("/") + 1);
+        if (!ATTACHMENT_EXTENSIONS.has(extensionOf(name))) continue;
+        // 本地已经有同名文件就不追了：链接写的目录与云端实际目录不一致时（比如图片被挪过），
+        // 不设这道闸会每个周期都重复下载同一个文件
+        if (this.hasLocalAttachmentNamed(name)) continue;
+        if (!missing.has(name)) missing.set(name, md.path);
+      }
+    }
+    return missing;
+  }
+
+  /** 本地是否已有同名附件（按文件名比，跨目录也算） */
+  private hasLocalAttachmentNamed(name: string): boolean {
+    const lower = name.toLowerCase();
+    const files = this.app.vault.getFiles?.() ?? [];
+    return files.some((f) => f.name.toLowerCase() === lower);
   }
 
   private armFlushTimer(): void {
@@ -531,11 +589,11 @@ export class SyncManager {
    */
   private async scanLocalAttachments(): Promise<void> {
     this.referencedAttachments = this.collectLocalAttachments();
+    this.unresolvedAttachments = this.collectUnresolvedAttachments();
     for (const path of this.referencedAttachments) {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) {
-        // 日记引用着、本地却没有这个文件：去云端补（云端也没有就是 404，静默跳过）。
-        // 每轮重新推导，所以上一轮因为下载上限被推迟的，这一轮还会再排进来，不会被丢掉
+        // 正常情况下走不到这里：链接能解析就说明文件在。留着兜底（索引与文件表短暂不一致）
         this.dirtyAttachments.set(path, "get");
         continue;
       }
@@ -551,6 +609,9 @@ export class SyncManager {
     // 只删引用、文件还留着的**不**推墓碑：云端那份留着更保守，用户日后重新引用无需重传
     for (const path of Object.keys(this.state.attachmentHashes)) {
       if (this.referencedAttachments.has(path)) continue;
+      // 文件名仍被日记引用着（哪怕链接解析不到）就不删：交给"按名取回"去把它补回来，
+      // 否则会把云端那份也删掉——别的设备跟着一起丢图
+      if (this.unresolvedAttachments.has(basenameOf(path))) continue;
       if (this.app.vault.getAbstractFileByPath(path)) continue;
       this.dirtyAttachments.set(path, "del");
     }
@@ -642,7 +703,7 @@ export class SyncManager {
    * <p>单条失败不拖垮整轮：记下第一个错误继续处理剩下的，最后再抛出，让状态栏如实报错。
    */
   private async flushAttachments(): Promise<void> {
-    if (this.dirtyAttachments.size === 0) return;
+    if (this.dirtyAttachments.size === 0 && this.unresolvedAttachments.size === 0) return;
     this.referencedAttachments = this.collectLocalAttachments();
     let firstError: Error | null = null;
     // 遍历快照：处理过程中可能有新事件入队（如 createBinary 触发的 create），让它们留给下一轮
@@ -660,6 +721,17 @@ export class SyncManager {
         }
       } catch (err) {
         // 归一化成 Error：最后要重新抛出，非 Error 的值会让调用方取不到 message
+        if (firstError === null) firstError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
+    // 再处理"日记引用着、本地根本没有"的那些：拿文件名去云端问（这是附件拉下来的主通道）
+    for (const [name, from] of [...this.unresolvedAttachments]) {
+      if (this.disposed) return;
+      // 上面几轮操作可能已经把它补下来了（或本地本来就有同名的）
+      if (this.hasLocalAttachmentNamed(name)) continue;
+      try {
+        await this.fetchAttachmentByName(name, from);
+      } catch (err) {
         if (firstError === null) firstError = err instanceof Error ? err : new Error(String(err));
       }
     }
@@ -886,24 +958,68 @@ export class SyncManager {
     await this.downloadAttachmentInto(rec.path);
   }
 
-  /** 把云端附件补到本地（受每轮上限约束）。服务端 404（盘上文件丢了）只跳过，不打断整轮 */
+  /** 把云端附件按路径补到本地（受每轮上限约束）。服务端 404（云端没有这个附件）只跳过，不打断整轮 */
   private async downloadAttachmentInto(path: string): Promise<void> {
+    if (this.downloadBudgetExhausted()) return;
+    const bytes = await this.downloadAttachment(path);
+    if (!bytes) return;
+    this.downloadedAttachments++;
+    this.downloadedAttachmentBytes += bytes.byteLength;
+    await this.saveAttachmentBytes(path, bytes);
+  }
+
+  /**
+   * 按文件名向云端要一个本地缺的附件，落到**服务端告诉我们的那个路径**上
+   * （响应头 X-Attachment-Path）。
+   *
+   * <p>为什么要问服务端而不是自己拼路径：日记里写的是 `![[Pasted image x.png]]`
+   * 这种不带目录的名字，它真正在库里的位置（如 `image/Pasted image x.png`）只有服务端知道
+   * （按同目录优先 → 最短路径 → 字典序解析）。落错位置的话，下一轮扫描会把同一个文件
+   * 当成另一个附件重复上传，云端就多出一份。
+   */
+  private async fetchAttachmentByName(name: string, from: string): Promise<void> {
+    if (this.downloadBudgetExhausted()) return;
+    const query = `&name=${encodeURIComponent(name)}&from=${encodeURIComponent(from)}`;
+    let res: { status: number; bytes: ArrayBuffer | null; headers: Record<string, string> };
+    try {
+      res = await this.attachmentRequest("GET", query);
+    } catch (err) {
+      if (err instanceof SyncAuthError) throw err;
+      if (err instanceof AttachmentMissingError) return; // 云端也没有：预期内，静默
+      console.warn(`Quick Daily Note: 按文件名取附件失败 ${name}`, err);
+      return;
+    }
+    const rawPath = res.headers["x-attachment-path"];
+    if (!res.bytes || !rawPath) {
+      // 没有落盘位置就宁可不下：凭空造一个路径会让云端多出一份重复附件
+      console.warn(`Quick Daily Note: 附件响应缺少 X-Attachment-Path，已跳过 ${name}`);
+      return;
+    }
+    this.downloadedAttachments++;
+    this.downloadedAttachmentBytes += res.bytes.byteLength;
+    await this.saveAttachmentBytes(decodeURIComponent(rawPath), res.bytes);
+  }
+
+  /** 每轮下载额度是否已用完；用完就记一笔推迟（下一轮扫描会从引用重新推导出来） */
+  private downloadBudgetExhausted(): boolean {
     if (
       this.downloadedAttachments >= ATTACHMENT_DOWNLOAD_PER_CYCLE ||
       this.downloadedAttachmentBytes >= ATTACHMENT_DOWNLOAD_BYTES_PER_CYCLE
     ) {
       this.deferredAttachments++;
-      return;
+      return true;
     }
-    const bytes = await this.downloadAttachment(path);
-    if (!bytes) return;
-    this.downloadedAttachments++;
-    this.downloadedAttachmentBytes += bytes.byteLength;
+    return false;
+  }
+
+  /** 落盘并记下哈希。不记的话下一轮会把它当成"没同步过"而重复下载 */
+  private async saveAttachmentBytes(path: string, bytes: ArrayBuffer): Promise<void> {
     await this.ensureParentFolders(path);
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) await this.app.vault.modifyBinary(existing, bytes);
     else await this.app.vault.createBinary(path, bytes);
     this.state.attachmentHashes[path] = await sha256HexBytes(bytes);
+    delete this.state.attachmentStamps[path]; // mtime 已变，别让下一轮命中旧 stamp
   }
 
   /** 逐级创建父文件夹（vault.create 不会自动建目录） */
@@ -963,7 +1079,7 @@ export class SyncManager {
     method: "GET" | "POST" | "DELETE",
     query: string,
     bytes?: ArrayBuffer,
-  ): Promise<{ status: number; json: unknown; bytes: ArrayBuffer | null }> {
+  ): Promise<{ status: number; json: unknown; bytes: ArrayBuffer | null; headers: Record<string, string> }> {
     const url = `${this.baseUrl()}/api/v1/sync/attachments?vault=${encodeURIComponent(this.host.getVaultName())}${query}`;
     let res = await this.send(url, method, await this.ensureAccessToken(), bytes, "application/octet-stream");
     if (res.status === 401) {
@@ -1017,7 +1133,7 @@ export class SyncManager {
     accessToken: string,
     body: string | ArrayBuffer | undefined,
     contentType: string,
-  ): Promise<{ status: number; json: unknown; bytes: ArrayBuffer | null }> {
+  ): Promise<{ status: number; json: unknown; bytes: ArrayBuffer | null; headers: Record<string, string> }> {
     try {
       const res = await requestUrl({
         url,
@@ -1026,7 +1142,8 @@ export class SyncManager {
         body,
         throw: false,
       });
-      return { status: res.status, json: res.json, bytes: res.arrayBuffer };
+      // headers 要给附件下载用：X-Attachment-Path 是服务端告知的落盘路径
+      return { status: res.status, json: res.json, bytes: res.arrayBuffer, headers: res.headers ?? {} };
     } catch (err) {
       throw new Error(`无法连接同步服务器（${String(err)}）`);
     }

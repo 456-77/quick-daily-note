@@ -87,9 +87,14 @@ class FakeVault {
     // 若 mtime 恒为 0，同长度的内容替换会被误判成没变化（同步就失灵了）
     this.clock = 0;
     this.mtimes = new Map();
-    // metadataCache.resolvedLinks 的假实现：fromPath -> { targetPath: 1 }，
-    // 由测试用例用 resolveLink() 显式登记（真实 Obsidian 由链接解析器填）
-    this.resolvedLinks = {};
+    // 链接表：引用方笔记 -> 笔记里**原样写的**目标（路径或文件名）。
+    // resolvedLinks / unresolvedLinks 由它加当前文件表推导（见下面的 getter），与 Obsidian 一致：
+    // 目标能对上实际文件（整路径相同，或文件名相同）才算 resolved，否则进 unresolved。
+    //
+    // 刻意不做成"测试直接往 resolvedLinks 里塞"：那样能造出 Obsidian 根本不会出现的状态
+    // （链接已解析、文件却不存在），而"日记引用的图本地没有"恰恰只可能表现为 unresolved。
+    // 上一版就是因为假模型允许了那个非法状态，让"图拉不下来"的 bug 一路测试通过。
+    this.linkTargets = new Map();
     this.adapter = {
       exists: async (p) => this.has(p) || this.folders.has(p),
     };
@@ -174,9 +179,44 @@ class FakeVault {
   touch(p) {
     this.mtimes.set(p, ++this.clock);
   }
-  /** 登记一条"笔记 -> 附件"的链接解析结果（附件发现就是读它） */
-  resolveLink(fromPath, targetPath) {
-    (this.resolvedLinks[fromPath] ??= {})[targetPath] = 1;
+  /** 登记一条「笔记 -> 链接目标」（原样记录，解析交给下面的 getter，模拟 Obsidian 的规则） */
+  declareLink(fromPath, target) {
+    if (!this.linkTargets.has(fromPath)) this.linkTargets.set(fromPath, new Set());
+    this.linkTargets.get(fromPath).add(target);
+  }
+  /** 把链接目标解析到实际文件：先按整路径，再按文件名（Obsidian 的顺序） */
+  resolveTarget(target) {
+    const all = [...this.files.keys(), ...this.binaries.keys()];
+    return (
+      all.find((p) => p === target) ??
+      all.find((p) => p.split("/").pop() === target) ??
+      null
+    );
+  }
+  /** 能解析到文件的链接：值为解析出的库内路径 */
+  get resolvedLinks() {
+    const out = {};
+    for (const [from, targets] of this.linkTargets) {
+      const map = {};
+      for (const target of targets) {
+        const hit = this.resolveTarget(target);
+        if (hit) map[hit] = 1;
+      }
+      if (Object.keys(map).length > 0) out[from] = map;
+    }
+    return out;
+  }
+  /** 解析不到文件的链接：键是笔记里原样写的目标 */
+  get unresolvedLinks() {
+    const out = {};
+    for (const [from, targets] of this.linkTargets) {
+      const map = {};
+      for (const target of targets) {
+        if (!this.resolveTarget(target)) map[target] = 1;
+      }
+      if (Object.keys(map).length > 0) out[from] = map;
+    }
+    return out;
   }
   /** 绕过事件的操作（模拟插件未运行时磁盘上的变化） */
   rawSet(p, content) {
@@ -204,9 +244,17 @@ function makeManager(vault, state, virtualFiles = {}) {
     // 虚拟文件（待办数据）默认不参与；需要时由调用方注入
     getVirtualFiles: () => virtualFiles,
   };
-  // metadataCache 的 resolvedLinks 用同一个对象引用：测试里 resolveLink 改了它，
-  // 插件下一轮扫描就能看到（和 Obsidian 里索引更新后插件读到新链接是一个意思）
-  const app = { vault, metadataCache: { resolvedLinks: vault.resolvedLinks } };
+  // metadataCache 的两张链接表都从 vault 的链接表 + 文件表实时推导，
+  // 插件下一轮扫描就能看到新登记的链接（和 Obsidian 里索引更新后插件读到新链接是一个意思）
+  const metadataCache = {
+    get resolvedLinks() {
+      return vault.resolvedLinks;
+    },
+    get unresolvedLinks() {
+      return vault.unresolvedLinks;
+    },
+  };
+  const app = { vault, metadataCache };
   const manager = new SyncManager(app, state, host);
   return { manager, statuses };
 }
@@ -576,7 +624,7 @@ vaultF.rawSet("日记/2026-09-11.md", "# 有图\n![[截图.png]]");
 vaultF.rawSetBinary("attachments/截图.png", PNG_A);
 vaultF.rawSetBinary("attachments/没人引用.png", PNG_B); // 没被任何日记引用：不该上云
 vaultF.rawSetBinary("attachments/木马.exe", PNG_A); // 白名单外：不该上云
-vaultF.resolveLink("日记/2026-09-11.md", "attachments/截图.png");
+vaultF.declareLink("日记/2026-09-11.md", "attachments/截图.png");
 
 const stateF = freshState();
 const F = makeManager(vaultF, stateF);
@@ -664,7 +712,7 @@ assert(upMd.status === 200, "另一台设备把引用它的日记也推上了云
 // 设备 H：本地有这篇日记（含引用），但游标已经推到当前仓库版本 —— 附件元数据被吞掉
 const vaultH = new FakeVault(vaultName);
 vaultH.rawSet("日记/2026-09-12.md", LOST_MD);
-vaultH.resolveLink("日记/2026-09-12.md", "attachments/lost.png");
+vaultH.declareLink("日记/2026-09-12.md", "attachments/lost.png");
 const stateH = freshState();
 stateH.cursor = await serverVersion();
 const H2 = makeManager(vaultH, stateH);
@@ -680,22 +728,22 @@ if (pulledLost !== undefined) {
     bytes.length === LOST.length && bytes.every((b, i) => b === LOST[i]),
     "补下来的字节与云端一致",
   );
-  // 关键：这一轮拉取是空的（游标已在附件版本之后），所以图只可能是按路径主动取回来的。
+  // 关键：这一轮拉取是空的（游标已在附件版本之后），所以图只可能是按文件名主动取回来的。
   // 断言请求确实发出去了，避免这条测试因为别的路径恰好生效而"假通过"
-  const pulledByPath = stub.requests
+  const pulledByName = stub.requests
     .slice(requestsBefore)
     .some(
       (r) =>
         r.method === "GET" &&
         r.url.includes("/api/v1/sync/attachments") &&
-        r.url.includes(encodeURIComponent("attachments/lost.png")),
+        r.url.includes(`name=${encodeURIComponent("lost.png")}`),
     );
-  assert(pulledByPath, "确实发出了按路径取图的 GET 请求（而不是等拉取流下发元数据）");
+  assert(pulledByName, "确实发出了按文件名取图的 GET 请求（而不是等拉取流下发元数据）");
 }
 
 // 云端根本没有的引用（图片只在别的设备上、或已被删除）：静默跳过，不该抛错
 vaultH.rawSet("日记/2026-09-12.md", `${LOST_MD}\n![[云端没有这张.png]]`);
-vaultH.resolveLink("日记/2026-09-12.md", "attachments/云端没有这张.png");
+vaultH.declareLink("日记/2026-09-12.md", "attachments/云端没有这张.png");
 let missingOk = true;
 try {
   await H2.manager.syncNow("manual");
@@ -706,6 +754,60 @@ try {
 assert(missingOk && H2.statuses.at(-1)?.kind === "ok", "云端没有的引用静默跳过，同步整体仍成功");
 
 H2.manager.destroy();
+
+// ------------------------------------------------------------
+// 场景 9：日记里是裸文件名引用、云端那张图在别的目录（线上实际遇到的情形）
+//   笔记写 ![[Pasted image x.png]]，图不在本地；云端存的是 image/Pasted image x.png。
+//   必须按文件名去要，并落到**服务端告诉我们的那个路径**上——落到别处的话，下一轮扫描
+//   会把它当成另一个附件重复上传，云端就多出一份。
+// ------------------------------------------------------------
+console.log("== 场景 9：裸文件名引用 + 云端在别的目录 ==");
+
+const CLOUD_IMG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 5, 5, 5, 5, 5]);
+const IMG_NAME = "Pasted image 20260901.png";
+const CLOUD_PATH = `image/${IMG_NAME}`;
+const REF_MD = `# 基名引用\n![[${IMG_NAME}]]`;
+
+const upImg = await serverUploadAttachment(CLOUD_PATH, CLOUD_IMG);
+assert(upImg.status === 200 && upImg.json?.data?.status === "stored", "另一台设备把图传到 image/ 目录");
+await api("POST", `/api/v1/sync?vault=${vaultQ}`, {
+  jwt: AT,
+  body: { items: [{ path: "日记/2026-09-13.md", content: REF_MD }] },
+});
+
+// 设备 I：本地有这篇日记（写的是裸文件名），但图不在本地 —— 链接因此解析不到
+const vaultI = new FakeVault(vaultName);
+vaultI.rawSet("日记/2026-09-13.md", REF_MD);
+vaultI.declareLink("日记/2026-09-13.md", IMG_NAME); // 笔记里原样写的：只有文件名，没有目录
+const stateI = freshState();
+stateI.cursor = await serverVersion(); // 游标已在附件版本之后：拉取流不会再下发它的元数据
+const I = makeManager(vaultI, stateI);
+I.manager.start();
+const reqsBefore9 = stub.requests.length;
+await I.manager.syncNow("manual");
+
+const pulledImg = vaultI.binaries.get(CLOUD_PATH);
+assert(pulledImg !== undefined, `按文件名取回并落在云端路径 ${CLOUD_PATH} 上`);
+if (pulledImg !== undefined) {
+  const bytes = new Uint8Array(pulledImg);
+  assert(
+    bytes.length === CLOUD_IMG.length && bytes.every((b, i) => b === CLOUD_IMG[i]),
+    "取回的字节与云端一致",
+  );
+}
+const askedByName = stub.requests
+  .slice(reqsBefore9)
+  .some((r) => r.method === "GET" && r.url.includes("/api/v1/sync/attachments") && r.url.includes("name="));
+assert(askedByName, "走的是按文件名（name=）取回，而不是按路径");
+
+// 没有被落成第二份：云端这个文件名下仍只有一行，且本地库根没凭空多出同名文件
+const sameName = (await attachmentRecords()).filter(
+  (a) => a.path === CLOUD_PATH || a.path === IMG_NAME || a.path.endsWith(`/${IMG_NAME}`),
+);
+assert(sameName.length === 1 && sameName[0].path === CLOUD_PATH, `云端没有多出重复附件（仍是 ${CLOUD_PATH}）`);
+assert(vaultI.binaries.get(IMG_NAME) === undefined, "没有在库根凭空造一个同名文件");
+
+I.manager.destroy();
 
 // ------------------------------------------------------------
 A2.manager.destroy();

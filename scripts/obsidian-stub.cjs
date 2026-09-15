@@ -25,10 +25,12 @@ const requests = [];
 /**
  * requestUrl：基于 Node fetch（fetch 对任何状态码都 resolve，网络错误 reject）。
  *
- * 与 Obsidian 真实行为对齐：text / json 只在响应类型匹配时才填，
- * arrayBuffer 恒有（附件下载靠它取字节）。若像早期那样无条件 text+JSON.parse，
- * 二进制响应会拿到一堆乱码 text，而真正的 arrayBuffer 是 undefined——
- * 附件下载的 bug 就测不出来了。
+ * 与 Obsidian 真实行为对齐：
+ * - text / json 只在响应类型匹配时才填，arrayBuffer 恒有（附件下载靠它取字节）。
+ *   若像早期那样无条件 text+JSON.parse，二进制响应会拿到一堆乱码 text，
+ *   而真正的 arrayBuffer 是 undefined——附件下载的 bug 就测不出来了。
+ * - headers 是**键全小写**的普通对象（插件读 X-Attachment-Path 这类自定义头靠它；
+ *   少返回它的话，附件会"下到手里却不知道往哪落"，测试里表现为静默跳过）。
  */
 async function requestUrl(options) {
   requests.push({ method: options.method || "GET", url: options.url });
@@ -38,6 +40,8 @@ async function requestUrl(options) {
     body: options.body,
   });
   const arrayBuffer = await res.arrayBuffer();
+  const headers = {};
+  for (const [k, v] of res.headers.entries()) headers[k.toLowerCase()] = v;
   const contentType = (res.headers.get("content-type") || "").toLowerCase();
   const isJson = contentType.includes("json");
   const isText = isJson || contentType.startsWith("text/");
@@ -50,7 +54,7 @@ async function requestUrl(options) {
       json = undefined;
     }
   }
-  return { status: res.status, arrayBuffer, text, json };
+  return { status: res.status, headers, arrayBuffer, text, json };
 }
 
 module.exports = { TAbstractFile, TFile, Notice, requestUrl, requests };

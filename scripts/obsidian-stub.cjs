@@ -19,21 +19,34 @@ class Notice {
   }
 }
 
-/** requestUrl：基于 Node fetch（fetch 对任何状态码都 resolve，网络错误 reject） */
+/**
+ * requestUrl：基于 Node fetch（fetch 对任何状态码都 resolve，网络错误 reject）。
+ *
+ * 与 Obsidian 真实行为对齐：text / json 只在响应类型匹配时才填，
+ * arrayBuffer 恒有（附件下载靠它取字节）。若像早期那样无条件 text+JSON.parse，
+ * 二进制响应会拿到一堆乱码 text，而真正的 arrayBuffer 是 undefined——
+ * 附件下载的 bug 就测不出来了。
+ */
 async function requestUrl(options) {
   const res = await fetch(options.url, {
     method: options.method || "GET",
     headers: options.headers || {},
     body: options.body,
   });
-  const text = await res.text();
+  const arrayBuffer = await res.arrayBuffer();
+  const contentType = (res.headers.get("content-type") || "").toLowerCase();
+  const isJson = contentType.includes("json");
+  const isText = isJson || contentType.startsWith("text/");
+  const text = isText ? new TextDecoder().decode(arrayBuffer) : undefined;
   let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    json = undefined;
+  if (isJson) {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = undefined;
+    }
   }
-  return { status: res.status, text, json };
+  return { status: res.status, arrayBuffer, text, json };
 }
 
 module.exports = { TAbstractFile, TFile, Notice, requestUrl };

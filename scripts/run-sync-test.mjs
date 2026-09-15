@@ -68,22 +68,30 @@ await build({
   logLevel: "silent",
 });
 const require_ = createRequire(import.meta.url);
-const { SyncManager, normalizeSyncState } = require_(path.join(testBuild, "sync.bundle.cjs"));
+const { SyncManager, normalizeSyncState, sha256HexBytes } = require_(path.join(testBuild, "sync.bundle.cjs"));
 const { mergeTodos, parseSnapshot, buildSnapshot } = require_(path.join(testBuild, "todos.bundle.cjs"));
 const stub = require_(path.join(testBuild, "node_modules", "obsidian", "stub.cjs"));
 
 // ------------------------------------------------------------
-// 测试用假 vault（内存文件表 + 事件）
+// 测试用假 vault（内存文件表 + 事件 + 二进制 + metadataCache）
 // ------------------------------------------------------------
 class FakeVault {
   constructor(name) {
     this.name = name; // 模拟 Obsidian 库名（M5.1：同步按它定位云端仓库）
-    this.files = new Map();
+    this.files = new Map(); // path -> string（文本文件）
+    this.binaries = new Map(); // path -> Uint8Array | ArrayBuffer（附件）
     this.folders = new Set();
     this.trashed = [];
     this.listeners = new Map();
+    // mtime 用单调递增的假时钟：附件的 mtime+size 旁路缓存要靠它判断"变没变"，
+    // 若 mtime 恒为 0，同长度的内容替换会被误判成没变化（同步就失灵了）
+    this.clock = 0;
+    this.mtimes = new Map();
+    // metadataCache.resolvedLinks 的假实现：fromPath -> { targetPath: 1 }，
+    // 由测试用例用 resolveLink() 显式登记（真实 Obsidian 由链接解析器填）
+    this.resolvedLinks = {};
     this.adapter = {
-      exists: async (p) => this.files.has(p) || this.folders.has(p),
+      exists: async (p) => this.has(p) || this.folders.has(p),
     };
   }
   on(name, cb) {
@@ -98,45 +106,91 @@ class FakeVault {
   emit(name, ...args) {
     for (const { cb } of this.listeners.get(name) ?? []) cb(...args);
   }
+  has(p) {
+    return this.files.has(p) || this.binaries.has(p);
+  }
+  sizeOf(p) {
+    const bytes = this.binaries.get(p);
+    if (bytes !== undefined) return bytes.byteLength;
+    const text = this.files.get(p);
+    return text === undefined ? 0 : Buffer.byteLength(text, "utf8");
+  }
   fileObj(p) {
     const f = new stub.TFile();
+    const name = p.split("/").pop();
+    const dot = name.lastIndexOf(".");
     f.path = p;
-    f.name = p.split("/").pop();
-    f.extension = "md";
-    f.basename = f.name.replace(/\.md$/, "");
+    f.name = name;
+    f.extension = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+    f.basename = dot > 0 ? name.slice(0, dot) : name;
+    f.stat = { mtime: this.mtimes.get(p) ?? 0, size: this.sizeOf(p) };
     return f;
   }
   getAbstractFileByPath(p) {
-    return this.files.has(p) ? this.fileObj(p) : null;
+    return this.has(p) ? this.fileObj(p) : null;
   }
   getMarkdownFiles() {
     return [...this.files.keys()].filter((p) => p.endsWith(".md")).map((p) => this.fileObj(p));
   }
+  getFiles() {
+    return [...this.files.keys(), ...this.binaries.keys()].map((p) => this.fileObj(p));
+  }
   async read(file) {
     return this.files.get(file.path);
   }
+  async readBinary(file) {
+    return this.binaries.get(file.path);
+  }
   async modify(file, content) {
     this.files.set(file.path, content);
+    this.touch(file.path);
+    this.emit("modify", this.fileObj(file.path));
+  }
+  async modifyBinary(file, bytes) {
+    this.binaries.set(file.path, bytes);
+    this.touch(file.path);
     this.emit("modify", this.fileObj(file.path));
   }
   async create(path, content) {
     this.files.set(path, content);
+    this.touch(path);
+    this.emit("create", this.fileObj(path));
+  }
+  async createBinary(path, bytes) {
+    this.binaries.set(path, bytes);
+    this.touch(path);
     this.emit("create", this.fileObj(path));
   }
   async trash(file) {
     this.trashed.push(file.path);
     this.files.delete(file.path);
+    this.binaries.delete(file.path);
+    this.mtimes.delete(file.path);
     this.emit("delete", this.fileObj(file.path));
   }
   async createFolder(path) {
     this.folders.add(path);
   }
+  touch(p) {
+    this.mtimes.set(p, ++this.clock);
+  }
+  /** 登记一条"笔记 -> 附件"的链接解析结果（附件发现就是读它） */
+  resolveLink(fromPath, targetPath) {
+    (this.resolvedLinks[fromPath] ??= {})[targetPath] = 1;
+  }
   /** 绕过事件的操作（模拟插件未运行时磁盘上的变化） */
   rawSet(p, content) {
     this.files.set(p, content);
+    this.touch(p);
+  }
+  rawSetBinary(p, bytes) {
+    this.binaries.set(p, bytes);
+    this.touch(p);
   }
   rawDelete(p) {
     this.files.delete(p);
+    this.binaries.delete(p);
+    this.mtimes.delete(p);
   }
 }
 
@@ -150,7 +204,10 @@ function makeManager(vault, state, virtualFiles = {}) {
     // 虚拟文件（待办数据）默认不参与；需要时由调用方注入
     getVirtualFiles: () => virtualFiles,
   };
-  const manager = new SyncManager({ vault }, state, host);
+  // metadataCache 的 resolvedLinks 用同一个对象引用：测试里 resolveLink 改了它，
+  // 插件下一轮扫描就能看到（和 Obsidian 里索引更新后插件读到新链接是一个意思）
+  const app = { vault, metadataCache: { resolvedLinks: vault.resolvedLinks } };
+  const manager = new SyncManager(app, state, host);
   return { manager, statuses };
 }
 
@@ -199,9 +256,26 @@ async function serverRecords(since = 0) {
     for (const r of data.records) byPath.set(r.path, r);
     vaultVersion = Math.max(vaultVersion, data.vaultVersion);
     if (!data.hasMore) break;
-    cursor = data.records[data.records.length - 1].version - 1;
+    // 正文与附件共用一条游标：翻页要取两侧的较大版本号（只取正文那侧会在纯附件页崩掉）
+    const tail = [...data.records, ...(data.attachments ?? [])];
+    cursor = Math.max(...tail.map((x) => x.version)) - 1;
   }
   return { vaultVersion, hasMore: false, records: [...byPath.values()] };
+}
+
+/** 从拉取接口取附件元数据（翻全量后只留非墓碑行） */
+async function attachmentRecords() {
+  const byPath = new Map();
+  let cursor = 0;
+  for (;;) {
+    const res = await api("GET", `/api/v1/sync?vault=${vaultQ}&since=${cursor}&limit=500`, { jwt: AT });
+    const data = res.json.data;
+    for (const a of data.attachments ?? []) byPath.set(a.path, a);
+    if (!data.hasMore) break;
+    const tail = [...data.records, ...(data.attachments ?? [])];
+    cursor = Math.max(...tail.map((x) => x.version)) - 1;
+  }
+  return [...byPath.values()].filter((a) => !a.deleted);
 }
 async function serverVersion() {
   const res = await api("GET", "/api/v1/vaults", { jwt: AT });
@@ -484,6 +558,75 @@ console.log("\n== 场景 10：待办条目级双向合并 ==");
 
   mgr.destroy();
 }
+
+// ------------------------------------------------------------
+// 场景 7：附件同步（M7）
+//   只同步被日记引用到的图片（附件在日记文件夹之外也照样同步）；
+//   重复同步幂等；空库设备按需补齐且逐字节一致；删引用+删文件 -> 墓碑 -> 对端进回收站；
+//   没被引用的、以及白名单外的（.exe）一律不上云
+// ------------------------------------------------------------
+console.log("== 场景 7：附件同步 ==");
+
+const PNG_A = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+const PNG_B = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 9, 9, 9]);
+const shaOf = (bytes) =>
+  sha256HexBytes(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+const vaultF = new FakeVault(vaultName);
+vaultF.rawSet("日记/2026-09-11.md", "# 有图\n![[截图.png]]");
+vaultF.rawSetBinary("attachments/截图.png", PNG_A);
+vaultF.rawSetBinary("attachments/没人引用.png", PNG_B); // 没被任何日记引用：不该上云
+vaultF.rawSetBinary("attachments/木马.exe", PNG_A); // 白名单外：不该上云
+vaultF.resolveLink("日记/2026-09-11.md", "attachments/截图.png");
+
+const stateF = freshState();
+const F = makeManager(vaultF, stateF);
+F.manager.start();
+await F.manager.syncNow("manual");
+
+let remoteAtts = await attachmentRecords();
+assert(remoteAtts.length === 1, `只上传被引用的附件（实际 ${remoteAtts.length} 条）`);
+assert(
+  remoteAtts[0]?.path === "attachments/截图.png",
+  "被同步的是日记引用到的那张（虽然它在日记文件夹之外）",
+);
+assert(remoteAtts[0]?.sha256 === (await shaOf(PNG_A)), "云端 sha256 与本地内容一致");
+assert(remoteAtts[0]?.name === "截图.png", "云端记录了文件名（网页端 ![[截图.png]] 靠它反查）");
+
+const vfBefore = await serverVersion();
+await F.manager.syncNow("interval");
+assert((await serverVersion()) === vfBefore, "附件无变化的重同步是 no-op（版本号不推进）");
+
+// 设备 G：空库，从零补齐附件
+const vaultG = new FakeVault(vaultName);
+const stateG = freshState();
+const G = makeManager(vaultG, stateG);
+G.manager.start();
+await G.manager.syncNow("manual");
+const pulled = vaultG.binaries.get("attachments/截图.png");
+assert(pulled !== undefined, "空库设备拉到了图片文件");
+const pulledBytes = new Uint8Array(pulled);
+assert(
+  pulledBytes.length === PNG_A.length && pulledBytes.every((b, i) => b === PNG_A[i]),
+  "对端图片字节与源端逐字节一致",
+);
+
+// 换内容：应重传并更新 sha256
+vaultF.rawSetBinary("attachments/截图.png", PNG_B);
+await F.manager.syncNow("manual");
+remoteAtts = await attachmentRecords();
+assert(remoteAtts[0]?.sha256 === (await shaOf(PNG_B)), "图片内容变化后重传（sha256 已更新）");
+
+// 删引用 + 删本地文件 -> 墓碑 -> 对端进回收站
+vaultF.rawSet("日记/2026-09-11.md", "# 没图了");
+delete vaultF.resolvedLinks["日记/2026-09-11.md"];
+vaultF.rawDelete("attachments/截图.png");
+await F.manager.syncNow("manual");
+assert((await attachmentRecords()).length === 0, "云端附件已置墓碑（非墓碑行 0 条）");
+await G.manager.syncNow("manual");
+assert(vaultG.trashed.includes("attachments/截图.png"), "对端跟随删除，文件进了回收站");
+
+F.manager.destroy();
+G.manager.destroy();
 
 // ------------------------------------------------------------
 A2.manager.destroy();

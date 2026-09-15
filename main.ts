@@ -5410,7 +5410,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("同步范围")
-      .setDesc("「日记文件夹」只同步上方存放位置内的 .md 文件；「整个库」同步库内所有 .md 文件（.obsidian 等点开头目录除外）。云端已有的文件始终会被拉取到本地，不受此范围限制。")
+      .setDesc("「日记文件夹」只同步上方存放位置内的 .md 文件；「整个库」同步库内所有 .md 文件（.obsidian 等点开头目录除外）。云端已有的文件始终会被拉取到本地，不受此范围限制。附件（图片 / PDF）按引用同步：只上传被范围内日记引用到的那些，与其自身存在哪个目录无关。")
       .addDropdown((drop) =>
         drop
           .addOption("folder", "日记文件夹")
@@ -5431,7 +5431,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
         ? new Date(s.lastSyncAt).toLocaleString()
         : "从未同步";
       syncStatusSetting.setDesc(
-        `上次同步：${time}；游标 v${s.cursor}；已同步 ${Object.keys(s.hashes).length} 个文件。` +
+        `上次同步：${time}；游标 v${s.cursor}；已同步 ${Object.keys(s.hashes).length} 个文件、${Object.keys(s.attachmentHashes).length} 个附件。` +
           (s.serverUrl && s.username && s.password ? "" : "（尚未配置地址与账号密码）")
       );
     };

@@ -629,6 +629,85 @@ F.manager.destroy();
 G.manager.destroy();
 
 // ------------------------------------------------------------
+// 场景 8：附件落在游标之外（复现"传得上去、拉不下来"）
+//   设备 A 用 2.8.0（不认识 pull 响应里的 attachments 字段）拉过一轮后，游标会取
+//   vaultVersion，把当时那些附件的版本号一并吞掉；之后升级到 2.9.0 再拉，增量里
+//   永远不会再出现这些附件。下载必须由"本地日记的引用"反推，而不是等云端下发。
+// ------------------------------------------------------------
+console.log("== 场景 8：附件落在游标之外 ==");
+
+const LOST = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7, 7, 7]);
+const LOST_MD = "# 游标之外的图\n![[lost.png]]";
+
+/** 以原始字节直接传一个附件（模拟另一台设备的上传，绕开插件） */
+async function serverUploadAttachment(path, bytes) {
+  const res = await fetch(
+    `${BASE}/api/v1/sync/attachments?vault=${vaultQ}&path=${encodeURIComponent(path)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream", Authorization: `Bearer ${AT}` },
+      body: bytes,
+    },
+  );
+  return { status: res.status, json: await res.json().catch(() => undefined) };
+}
+
+// 别的设备把图与日记推上云
+const upAtt = await serverUploadAttachment("attachments/lost.png", LOST);
+assert(upAtt.status === 200 && upAtt.json?.data?.status === "stored", "另一台设备把图传上了云");
+const upMd = await api("POST", `/api/v1/sync?vault=${vaultQ}`, {
+  jwt: AT,
+  body: { items: [{ path: "日记/2026-09-12.md", content: LOST_MD }] },
+});
+assert(upMd.status === 200, "另一台设备把引用它的日记也推上了云");
+
+// 设备 H：本地有这篇日记（含引用），但游标已经推到当前仓库版本 —— 附件元数据被吞掉
+const vaultH = new FakeVault(vaultName);
+vaultH.rawSet("日记/2026-09-12.md", LOST_MD);
+vaultH.resolveLink("日记/2026-09-12.md", "attachments/lost.png");
+const stateH = freshState();
+stateH.cursor = await serverVersion();
+const H2 = makeManager(vaultH, stateH);
+H2.manager.start();
+const requestsBefore = stub.requests.length;
+await H2.manager.syncNow("manual");
+
+const pulledLost = vaultH.binaries.get("attachments/lost.png");
+assert(pulledLost !== undefined, "游标越过附件版本号后，仍按日记引用把图补了下来");
+if (pulledLost !== undefined) {
+  const bytes = new Uint8Array(pulledLost);
+  assert(
+    bytes.length === LOST.length && bytes.every((b, i) => b === LOST[i]),
+    "补下来的字节与云端一致",
+  );
+  // 关键：这一轮拉取是空的（游标已在附件版本之后），所以图只可能是按路径主动取回来的。
+  // 断言请求确实发出去了，避免这条测试因为别的路径恰好生效而"假通过"
+  const pulledByPath = stub.requests
+    .slice(requestsBefore)
+    .some(
+      (r) =>
+        r.method === "GET" &&
+        r.url.includes("/api/v1/sync/attachments") &&
+        r.url.includes(encodeURIComponent("attachments/lost.png")),
+    );
+  assert(pulledByPath, "确实发出了按路径取图的 GET 请求（而不是等拉取流下发元数据）");
+}
+
+// 云端根本没有的引用（图片只在别的设备上、或已被删除）：静默跳过，不该抛错
+vaultH.rawSet("日记/2026-09-12.md", `${LOST_MD}\n![[云端没有这张.png]]`);
+vaultH.resolveLink("日记/2026-09-12.md", "attachments/云端没有这张.png");
+let missingOk = true;
+try {
+  await H2.manager.syncNow("manual");
+} catch (e) {
+  missingOk = false;
+  console.error("    ", e);
+}
+assert(missingOk && H2.statuses.at(-1)?.kind === "ok", "云端没有的引用静默跳过，同步整体仍成功");
+
+H2.manager.destroy();
+
+// ------------------------------------------------------------
 A2.manager.destroy();
 B.manager.destroy();
 D.manager.destroy();

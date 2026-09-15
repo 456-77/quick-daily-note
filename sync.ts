@@ -23,6 +23,9 @@ import { App, EventRef, Notice, TAbstractFile, TFile, requestUrl } from "obsidia
  * 附件策略（M7）：只同步**被同步范围内日记引用到的**附件（见 collectLocalAttachments），
  * 不去镜像整个库的二进制——粘贴图片的落点取决于用户配置（插件自己的 pastedImageFolder
  * 或 Obsidian 原生附件目录），盯目录必然漏，而按引用扫与落点无关。
+ * 上传与下载都由引用驱动：引用着但本地缺的就去云端取（见 scanLocalAttachments），
+ * 不依赖拉取流下发附件元数据——拉取有游标，用旧版插件拉过一轮的设备，游标会越过那些
+ * 附件的版本号，之后增量里再也不会出现它们。
  */
 
 /** 每设备独立的同步配置与状态（data.json 的 sync 键） */
@@ -176,6 +179,13 @@ class SyncAuthError extends Error {
   }
 }
 
+/**
+ * 404：云端没有这个附件。
+ * 这是**预期内**的结果而不是故障——日记可能引用着只在别的设备上、尚未上传或已被删除的
+ * 附件（见 fetchAttachment），所以下载侧要静默跳过，不能当成错误刷提示。
+ */
+class AttachmentMissingError extends Error {}
+
 /** SHA-256 十六进制（与后端 HashUtil.sha256Hex 对 UTF-8 字节的结果一致） */
 export async function sha256Hex(content: string): Promise<string> {
   return hexOf(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content)));
@@ -224,8 +234,12 @@ export class SyncManager {
   private virtualPaths = new Set<string>();
   /** 拉取到的云端虚拟文件内容，推送前用它比较新旧 */
   private remoteVirtual = new Map<string, string>();
-  /** 待上传附件队列：path -> 最新操作。附件传的是原始字节、一条一个请求，与正文分批推送分开 */
-  private dirtyAttachments = new Map<string, "mod" | "del">();
+  /**
+   * 待处理附件队列：path -> 操作。
+   * `mod` 上传/覆盖、`del` 墓碑、`get` 从云端补下本地缺的那个文件
+   * （附件是一条一个请求的原始字节传输，与正文的分批推送分开）。
+   */
+  private dirtyAttachments = new Map<string, "mod" | "del" | "get">();
   /**
    * 本周期「被同步范围内日记引用到」的附件路径集合。
    * 它同时决定上传对象与下载对象——不在这个集合里的附件一律不同步（见文件头附件策略）。
@@ -503,9 +517,15 @@ export class SyncManager {
   }
 
   /**
-   * 扫描被引用的本地附件，把有变化的排进上传队列。
+   * 扫描被引用的附件：本地缺的排「取」，有变化的排「传」。
    *
-   * 用 mtime+size 做旁路缓存：附件动辄几 MB，每个周期把所有引用到的附件读一遍重算哈希
+   * <p>「本地缺 → 主动去云端取」这一步是附件能拉下来的关键。只靠拉取流下发元数据
+   * 是不够的：拉取有游标，任何一台设备用旧版插件拉过一轮，游标就越过了那些附件的
+   * 版本号（游标取 vaultVersion，把没处理的附件版本一起吞了），之后增量里再也不会
+   * 出现它们，图片就永远下不来。改成由**本地日记的引用**反推需要什么、直接按路径去要，
+   * 游标跳没跳过都不影响。
+   *
+   * <p>用 mtime+size 做旁路缓存：附件动辄几 MB，每个周期把所有引用到的附件读一遍重算哈希
    * 太浪费，时间戳与大小都没变就跳过读取。缓存只影响性能不影响正确性——哈希缺失时
    * 多算一次即可（缓存永远不当成"已同步"的依据，判断一律看 attachmentHashes）。
    */
@@ -513,7 +533,12 @@ export class SyncManager {
     this.referencedAttachments = this.collectLocalAttachments();
     for (const path of this.referencedAttachments) {
       const file = this.app.vault.getAbstractFileByPath(path);
-      if (!(file instanceof TFile)) continue; // 引用到了但本地还没这个文件：等拉取补齐
+      if (!(file instanceof TFile)) {
+        // 日记引用着、本地却没有这个文件：去云端补（云端也没有就是 404，静默跳过）。
+        // 每轮重新推导，所以上一轮因为下载上限被推迟的，这一轮还会再排进来，不会被丢掉
+        this.dirtyAttachments.set(path, "get");
+        continue;
+      }
       const stamp = `${file.stat.mtime}:${file.stat.size}`;
       if (this.state.attachmentStamps[path] === stamp && this.state.attachmentHashes[path] !== undefined) {
         continue;
@@ -605,7 +630,7 @@ export class SyncManager {
   // ------------------------------------------------------------
 
   /**
-   * 上传/删除附件。
+   * 处理附件队列：上传/覆盖、墓碑、以及从云端补下本地缺的。
    *
    * <p>一条一个请求是刻意的：服务端"一次上传占一个版本号"，而正文是"一批占一个版本号"，
    * 这保证同一个版本号下只有一类行，拉取时的两表归并才不会歧义（见后端 SyncService.pull）。
@@ -628,6 +653,8 @@ export class SyncManager {
       try {
         if (op === "del") {
           await this.deleteAttachment(path);
+        } else if (op === "get") {
+          await this.fetchAttachment(path);
         } else {
           await this.uploadAttachment(path);
         }
@@ -637,6 +664,19 @@ export class SyncManager {
       }
     }
     if (firstError !== null) throw firstError;
+  }
+
+  /**
+   * 从云端补下一个「日记还引用着、本地却没有」的附件。
+   *
+   * <p>不依赖拉取流是否把该附件的元数据送到（游标越过附件版本号的情况见
+   * scanLocalAttachments 的说明），直接按路径去要。云端没有就是 404，
+   * 属于预期（该附件只在别的设备上、或已被删除），静默跳过，每轮最多重试一次。
+   */
+  private async fetchAttachment(path: string): Promise<void> {
+    // 同一轮里 applyAttachment 可能刚把它补下来，别再下一次
+    if (this.app.vault.getAbstractFileByPath(path)) return;
+    await this.downloadAttachmentInto(path);
   }
 
   /**
@@ -793,12 +833,12 @@ export class SyncManager {
   /**
    * 应用单条远端附件元数据（冲突策略与正文完全一致：本地改动过就本地胜并重推）。
    *
-   * <p>下载**不**受引用集约束：服务端只会知道被某台设备的日记引用过的附件
-   * （各设备都只上传被引用的），所以云端列出什么就是该补的。
-   * 引用集只用来决定上传与墓碑（见 flushAttachments）。
+   * <p>这里是"云端主动告知"的那条补充路径：拉取流里带了附件元数据时，本设备立即按它
+   * 补齐/删除/重推。它**不**是唯一的下载入口——本地缺、但日记引用着的附件由
+   * {@link fetchAttachment} 按需去取，所以游标越过附件版本号也不会漏（见
+   * scanLocalAttachments 的说明）。
    *
-   * <p>每轮下载有条数与字节上限，被推迟的下一轮继续——引用还在就不会漏，
-   * 只是不会让新设备一开就卡在几百张图上。
+   * <p>每轮下载有条数与字节上限，被推迟的下一轮由扫描重新推导出来继续下，不会丢。
    */
   private async applyAttachment(rec: RemoteAttachment, conflicts: string[]): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(rec.path);
@@ -930,6 +970,10 @@ export class SyncManager {
       res = await this.send(url, method, await this.ensureAccessToken(true), bytes, "application/octet-stream");
       if (res.status === 401) throw new SyncAuthError();
     }
+    if (res.status === 404) {
+      // 云端没有这个附件：对下载侧是预期结果（见 AttachmentMissingError），单独抛出来
+      throw new AttachmentMissingError(`附件不在云端: ${query}`);
+    }
     if (res.status !== 200) {
       // 服务端的 message 有信息量（"只同步 png / ..."、"仓库附件配额已满"），别丢了
       const message = (res.json as { message?: string } | undefined)?.message;
@@ -938,12 +982,19 @@ export class SyncManager {
     return res;
   }
 
-  /** 下载附件原始字节。非凭证类失败只告警返回 null（服务端盘上文件丢了、单张图坏掉都不该打断整轮同步） */
+  /**
+   * 下载附件原始字节。
+   *
+   * 两类失败都只是返回 null 不打断整轮：404（云端没有，属于预期）静默跳过；
+   * 其他错误（网络抖动、服务端盘上文件丢了）打一条告警。都不抛，因为一张图取不到
+   * 不该让整轮同步失败。凭证问题照旧上抛。
+   */
   private async downloadAttachment(path: string): Promise<ArrayBuffer | null> {
     try {
       return (await this.attachmentRequest("GET", `&path=${encodeURIComponent(path)}`)).bytes;
     } catch (err) {
       if (err instanceof SyncAuthError) throw err;
+      if (err instanceof AttachmentMissingError) return null;
       console.warn(`Quick Daily Note: 附件下载失败 ${path}`, err);
       return null;
     }

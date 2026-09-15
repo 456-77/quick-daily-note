@@ -19,6 +19,9 @@ class Notice {
   }
 }
 
+/** 请求记录：测试用来断言"某条请求确实发出去了"（如按路径补下附件） */
+const requests = [];
+
 /**
  * requestUrl：基于 Node fetch（fetch 对任何状态码都 resolve，网络错误 reject）。
  *
@@ -28,6 +31,7 @@ class Notice {
  * 附件下载的 bug 就测不出来了。
  */
 async function requestUrl(options) {
+  requests.push({ method: options.method || "GET", url: options.url });
   const res = await fetch(options.url, {
     method: options.method || "GET",
     headers: options.headers || {},
@@ -49,4 +53,4 @@ async function requestUrl(options) {
   return { status: res.status, arrayBuffer, text, json };
 }
 
-module.exports = { TAbstractFile, TFile, Notice, requestUrl };
+module.exports = { TAbstractFile, TFile, Notice, requestUrl, requests };

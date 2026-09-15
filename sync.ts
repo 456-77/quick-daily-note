@@ -177,6 +177,18 @@ interface RemoteAttachment {
   version: number;
 }
 
+/**
+ * send() 的返回。
+ * `json` 是**函数**而不是字段：真实 Obsidian 的响应对象上读 json 会抛（二进制体上尤其），
+ * 必须惰性取值并容错，不能在校验响应时无脑读一次。
+ */
+interface SendResult {
+  status: number;
+  headers: Record<string, string>;
+  bytes: ArrayBuffer | null;
+  json: () => unknown;
+}
+
 /** 401：账号密码被拒 / refresh 失效且登录失败（提示用户去设置里更新，别当成网络错误重试轰炸） */
 class SyncAuthError extends Error {
   constructor() {
@@ -210,6 +222,60 @@ function hexOf(digest: ArrayBuffer): string {
 /** 取路径的文件名部分 */
 function basenameOf(path: string): string {
   return path.substring(path.lastIndexOf("/") + 1);
+}
+
+/**
+ * 从响应头里取值。**键的大小写没有保证**：Node/浏览器侧普遍小写化，但 Obsidian 的
+ * requestUrl 是否如此并无契约，所以统一按小写比对，别用 headers["x-xxx"] 直接取。
+ */
+function headerValue(headers: Record<string, string>, name: string): string | undefined {
+  const wanted = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === wanted) return value;
+  }
+  return undefined;
+}
+
+/**
+ * 从 markdown 正文里提取附件引用的文件名。
+ *
+ * 支持两种写法：`![[图.png]]` / `![[图.png|300]]`（Obsidian 的嵌入）与 `![](路径/图.png)`。
+ * **跳过围栏代码块与行内代码**，否则笔记里讲用法的示例文本会被当成真引用，导致每次同步
+ * 都为一张根本不存在的图发一次请求。
+ */
+function extractAttachmentNames(content: string): Set<string> {
+  const names = new Set<string>();
+  let fence: string | null = null;
+  for (const line of content.split("\n")) {
+    const fenceMatch = /^\s*(```+|~~~+)/.exec(line);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      if (fence === null) fence = marker;
+      else if (fence === marker) fence = null;
+      continue;
+    }
+    if (fence !== null) continue;
+    // 行内代码：按反引号切开，只保留代码之外的片段
+    for (const segment of line.split(/`+[^`]*`+/)) {
+      for (const m of segment.matchAll(/!\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]/g)) {
+        const name = basenameOf(m[1].trim());
+        if (name !== "") names.add(name);
+      }
+      for (const m of segment.matchAll(/!\[[^\]]*\]\(\s*([^)\s]+)/g)) {
+        const raw = m[1];
+        if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) continue; // 外链不碰
+        let target = raw;
+        try {
+          target = decodeURIComponent(raw);
+        } catch {
+          // 转换失败就按原样处理
+        }
+        const name = basenameOf(target);
+        if (name !== "") names.add(name);
+      }
+    }
+  }
+  return names;
 }
 
 /** 取文件名部分的扩展名（小写）；目录名里的点不算 */
@@ -529,6 +595,30 @@ export class SyncManager {
     return missing;
   }
 
+  /**
+   * 从笔记正文里直接解析出「引用着、但本地没有」的附件：文件名 -> 引用它的日记路径。
+   *
+   * <p>**这是附件能拉下来的主通道**，不再依赖 Obsidian 的链接表。理由：Obsidian 只把能解析到
+   * 实际文件的链接放进 resolvedLinks，而 unresolvedLinks 里到底有没有这些引用，实测并不可靠
+   * （线上：笔记里 4 处 `![[Pasted image ….png]]` 都显示「找不到」，但插件在真实库里读不到它们，
+   * 两轮周期同步都没发出取图请求）。正文本身就是权威来源——写着 `![[图.png]]` 就是需要这张图，
+   * 不必问任何人，也不受索引状态影响。
+   *
+   * @param contentByMd 扫描阶段已经读进来的正文（path -> 内容），避免重复读盘
+   */
+  private collectMissingFromText(contentByMd: Map<string, string>): Map<string, string> {
+    const missing = new Map<string, string>();
+    for (const [mdPath, content] of contentByMd) {
+      for (const name of extractAttachmentNames(content)) {
+        if (!ATTACHMENT_EXTENSIONS.has(extensionOf(name))) continue;
+        // 本地已经有同名的就不追（上传交给 resolvedLinks 那条路）
+        if (this.hasLocalAttachmentNamed(name)) continue;
+        if (!missing.has(name)) missing.set(name, mdPath);
+      }
+    }
+    return missing;
+  }
+
   /** 本地是否已有同名附件（按文件名比，跨目录也算） */
   private hasLocalAttachmentNamed(name: string): boolean {
     const lower = name.toLowerCase();
@@ -559,9 +649,14 @@ export class SyncManager {
    * 拉取应用阶段认定的冲突也会写 dirty，与这里互不冲突（Map 后写覆盖）。
    */
   private async scanLocalFiles(): Promise<void> {
+    const contentByMd = new Map<string, string>();
     for (const file of this.app.vault.getMarkdownFiles()) {
       if (!this.inScope(file.path)) continue;
-      const hash = await sha256Hex(await this.app.vault.read(file));
+      const content = await this.app.vault.read(file);
+      // 顺带留下正文：附件引用的权威来源是正文本身（见 collectMissingFromText），
+      // 已经为算哈希读进来了，不必再读一遍
+      contentByMd.set(file.path, content);
+      const hash = await sha256Hex(content);
       if (this.state.hashes[file.path] !== hash) this.dirty.set(file.path, "mod");
     }
     // 虚拟文件（待办数据）不在库里，单独比对内存内容的哈希
@@ -571,7 +666,7 @@ export class SyncManager {
       const hash = await sha256Hex(content);
       if (this.state.hashes[path] !== hash) this.dirty.set(path, "mod");
     }
-    await this.scanLocalAttachments();
+    await this.scanLocalAttachments(contentByMd);
   }
 
   /**
@@ -587,9 +682,16 @@ export class SyncManager {
    * 太浪费，时间戳与大小都没变就跳过读取。缓存只影响性能不影响正确性——哈希缺失时
    * 多算一次即可（缓存永远不当成"已同步"的依据，判断一律看 attachmentHashes）。
    */
-  private async scanLocalAttachments(): Promise<void> {
+  private async scanLocalAttachments(contentByMd: Map<string, string>): Promise<void> {
     this.referencedAttachments = this.collectLocalAttachments();
-    this.unresolvedAttachments = this.collectUnresolvedAttachments();
+    // 两条来源取并集：链接表 + 正文解析。正文解析是关键那条——线上实测 Obsidian 的
+    // unresolvedLinks 里拿不到这些引用（见 collectMissingFromText），只信链接表就会漏。
+    const fromLinks = this.collectUnresolvedAttachments();
+    const fromText = this.collectMissingFromText(contentByMd);
+    this.unresolvedAttachments = fromText;
+    for (const [name, from] of fromLinks) {
+      if (!this.unresolvedAttachments.has(name)) this.unresolvedAttachments.set(name, from);
+    }
     for (const path of this.referencedAttachments) {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) {
@@ -978,18 +1080,23 @@ export class SyncManager {
    * 当成另一个附件重复上传，云端就多出一份。
    */
   private async fetchAttachmentByName(name: string, from: string): Promise<void> {
-    if (this.downloadBudgetExhausted()) return;
+    if (this.downloadBudgetExhausted()) {
+      return;
+    }
     const query = `&name=${encodeURIComponent(name)}&from=${encodeURIComponent(from)}`;
     let res: { status: number; bytes: ArrayBuffer | null; headers: Record<string, string> };
     try {
       res = await this.attachmentRequest("GET", query);
     } catch (err) {
       if (err instanceof SyncAuthError) throw err;
-      if (err instanceof AttachmentMissingError) return; // 云端也没有：预期内，静默
+      if (err instanceof AttachmentMissingError) {
+        return; // 云端也没有：预期内，静默
+      }
       console.warn(`Quick Daily Note: 按文件名取附件失败 ${name}`, err);
       return;
     }
-    const rawPath = res.headers["x-attachment-path"];
+    // 响应头名的大小写没有保证（Obsidian 的 requestUrl 未必把键小写化），必须大小写无关地取
+    const rawPath = headerValue(res.headers, "x-attachment-path");
     if (!res.bytes || !rawPath) {
       // 没有落盘位置就宁可不下：凭空造一个路径会让云端多出一份重复附件
       console.warn(`Quick Daily Note: 附件响应缺少 X-Attachment-Path，已跳过 ${name}`);
@@ -1062,7 +1169,7 @@ export class SyncManager {
       if (res.status === 401) throw new SyncAuthError();
     }
     if (res.status !== 200) throw new Error(`服务器返回 HTTP ${res.status}`);
-    const json = res.json as { code?: number; message?: string; data?: T } | undefined;
+    const json = res.json() as { code?: number; message?: string; data?: T } | undefined;
     if (!json || json.code !== 0 || json.data === undefined) {
       throw new Error((json && json.message) || "响应格式错误");
     }
@@ -1092,7 +1199,7 @@ export class SyncManager {
     }
     if (res.status !== 200) {
       // 服务端的 message 有信息量（"只同步 png / ..."、"仓库附件配额已满"），别丢了
-      const message = (res.json as { message?: string } | undefined)?.message;
+      const message = (res.json() as { message?: string } | undefined)?.message;
       throw new Error(`附件同步失败（HTTP ${res.status}）${message ? "：" + message : ""}`);
     }
     return res;
@@ -1133,7 +1240,7 @@ export class SyncManager {
     accessToken: string,
     body: string | ArrayBuffer | undefined,
     contentType: string,
-  ): Promise<{ status: number; json: unknown; bytes: ArrayBuffer | null; headers: Record<string, string> }> {
+  ): Promise<SendResult> {
     try {
       const res = await requestUrl({
         url,
@@ -1142,8 +1249,32 @@ export class SyncManager {
         body,
         throw: false,
       });
-      // headers 要给附件下载用：X-Attachment-Path 是服务端告知的落盘路径
-      return { status: res.status, json: res.json, bytes: res.arrayBuffer, headers: res.headers ?? {} };
+      let headers: Record<string, string> = {};
+      try {
+        headers = res.headers ?? {};
+      } catch {
+        // headers 不可读时就算了（附件下载会因为没有落盘路径而跳过，不会写坏本地）
+      }
+      return {
+        status: res.status,
+        headers,
+        bytes: res.arrayBuffer,
+        /*
+         * json 必须**惰性且容错**地读。
+         *
+         * Obsidian 的响应对象上 json 是个读取时会抛的访问器：响应体不是 JSON 就直接抛
+         * SyntaxError。附件下载拿到的是 image/png，这里要是顺手写 `json: res.json`，
+         * 请求明明成功、图也回来了，却会在这里抛错并被上面的 catch 包成
+         * "无法连接同步服务器"——看着像网络问题，实际是读了不该读的字段（真实踩过）。
+         */
+        json: () => {
+          try {
+            return res.json as unknown;
+          } catch {
+            return undefined;
+          }
+        },
+      };
     } catch (err) {
       throw new Error(`无法连接同步服务器（${String(err)}）`);
     }

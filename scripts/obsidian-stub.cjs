@@ -45,16 +45,28 @@ async function requestUrl(options) {
   const contentType = (res.headers.get("content-type") || "").toLowerCase();
   const isJson = contentType.includes("json");
   const isText = isJson || contentType.startsWith("text/");
-  const text = isText ? new TextDecoder().decode(arrayBuffer) : undefined;
-  let json;
-  if (isJson) {
-    try {
-      json = JSON.parse(text);
-    } catch {
-      json = undefined;
-    }
-  }
-  return { status: res.status, headers, arrayBuffer, text, json };
+  /*
+   * json / text 必须是**读取时会抛的惰性访问器**——真实 Obsidian 就是这样：
+   * 响应体不是对应类型时读它直接抛（二进制响应上读 .json → SyntaxError: Unexpected token '�'）。
+   *
+   * 早期这里返回普通对象（类型不匹配就是 undefined，不抛），结果插件里"顺手读一下 res.json"
+   * 这类 bug 在测试里永远暴露不出来：附件下载正是这么栽的——请求发出去了、图也回来了，
+   * 却在读 res.json 时抛错，被 catch 包成"无法连接同步服务器"，看着像网络问题。
+   */
+  const response = {
+    status: res.status,
+    headers,
+    arrayBuffer,
+    get text() {
+      if (!isText) throw new SyntaxError("Response body is not text");
+      return new TextDecoder().decode(arrayBuffer);
+    },
+    get json() {
+      if (!isJson) throw new SyntaxError("Unexpected token in JSON");
+      return JSON.parse(new TextDecoder().decode(arrayBuffer));
+    },
+  };
+  return response;
 }
 
 module.exports = { TAbstractFile, TFile, Notice, requestUrl, requests };

@@ -66,6 +66,10 @@ const VIEW_TYPE = "quick-daily-note-view";
 interface QuickDailyNoteSettings {
   /** 日记存放文件夹，空字符串表示库根目录 */
   folder: string;
+  /** 周记存放文件夹，空字符串表示与日记同目录 */
+  weeklyFolder: string;
+  /** 月记存放文件夹，空字符串表示与日记同目录 */
+  monthlyFolder: string;
   /** 日期格式（moment 语法） */
   dateFormat: string;
   /** 按日期关联的待办事项 */
@@ -131,6 +135,10 @@ interface QuickDailyNoteSettings {
   weeklyTemplateEnabled: boolean;
   /** 周记模板文件路径（vault 内相对路径） */
   weeklyTemplatePath: string;
+  /** 创建月记时套用模板 */
+  monthlyTemplateEnabled: boolean;
+  /** 月记模板文件路径（vault 内相对路径） */
+  monthlyTemplatePath: string;
   /** 启用全局背景图片 */
   bgEnabled: boolean;
   /** 背景图片路径（vault 内相对路径） */
@@ -155,6 +163,8 @@ interface QuickDailyNoteSettings {
 
 const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
   folder: "",
+  weeklyFolder: "",
+  monthlyFolder: "",
   dateFormat: "YYYY-MM-DD",
   todos: {},
   todosUpdatedAt: 0,
@@ -185,6 +195,8 @@ const DEFAULT_SETTINGS: QuickDailyNoteSettings = {
   dailyTemplatePath: "",
   weeklyTemplateEnabled: false,
   weeklyTemplatePath: "",
+  monthlyTemplateEnabled: false,
+  monthlyTemplatePath: "",
   bgEnabled: false,
   bgImagePath: "",
   bgOpacity: 0.6,
@@ -406,6 +418,30 @@ export default class QuickDailyNotePlugin extends Plugin {
       id: "choose-weekly-review",
       name: "生成选定周的回顾",
       callback: () => new WeekReviewModal(this.app, this).open(),
+    });
+
+    this.addCommand({
+      id: "open-current-weekly-note",
+      name: "打开/创建本周周记",
+      callback: () => {
+        const monday = moment().startOf("isoWeek");
+        void this.openOrCreateWeeklyNote(
+          monday.format("GGGG-[W]WW"),
+          monday.format(this.settings.dateFormat)
+        );
+      },
+    });
+
+    this.addCommand({
+      id: "open-current-monthly-note",
+      name: "打开/创建本月月记",
+      callback: () => {
+        const start = moment().startOf("month");
+        void this.openOrCreateMonthlyNote(
+          start.format("YYYY-MM"),
+          start.format(this.settings.dateFormat)
+        );
+      },
     });
 
     this.addCommand({
@@ -2679,26 +2715,53 @@ export default class QuickDailyNotePlugin extends Plugin {
    * 没有则弹窗输入名字创建。
    */
   async openOrCreateDailyNote(dateStr: string) {
-    const folderPath = normalizePath(this.settings.folder);
-    const folder = folderPath
-      ? this.app.vault.getAbstractFileByPath(folderPath)
-      : this.app.vault.getRoot();
+    const folder = this.getDiaryFolder();
 
     const file = this.findDailyNote(folder, dateStr);
     if (file) {
+      const parsed = moment(dateStr, this.settings.dateFormat, true);
+      await this.applyTemplateIfStub(file, "daily", {
+        dateMoment: parsed.isValid() ? parsed : moment(),
+      });
       void this.app.workspace.getLeaf(false).openFile(file);
       return;
     }
     new CreateDailyNoteModal(this.app, this, dateStr).open();
   }
 
-  /** 日记存放文件夹（不存在时返回 null） */
-  getDiaryFolder(): TFolder | null {
-    const folderPath = normalizePath(this.settings.folder);
-    const f = folderPath
-      ? this.app.vault.getAbstractFileByPath(folderPath)
+  /**
+   * 解析某类笔记的存放文件夹路径（未 trim 的空串表示库根目录）：
+   * 周记/月记未单独设置时回落到日记目录。
+   */
+  resolveNoteFolder(kind: "daily" | "weekly" | "monthly"): string {
+    const daily = this.settings.folder.trim();
+    if (kind === "weekly") return this.settings.weeklyFolder.trim() || daily;
+    if (kind === "monthly") return this.settings.monthlyFolder.trim() || daily;
+    return daily;
+  }
+
+  /** 按路径取文件夹（不存在时返回 null；空路径为库根目录） */
+  private getFolderByPath(folderPath: string): TFolder | null {
+    const path = normalizePath(folderPath);
+    const f = path
+      ? this.app.vault.getAbstractFileByPath(path)
       : this.app.vault.getRoot();
     return f instanceof TFolder ? f : null;
+  }
+
+  /** 日记存放文件夹（不存在时返回 null） */
+  getDiaryFolder(): TFolder | null {
+    return this.getFolderByPath(this.resolveNoteFolder("daily"));
+  }
+
+  /** 周记存放文件夹（未设置时与日记同目录；不存在时返回 null） */
+  getWeeklyFolder(): TFolder | null {
+    return this.getFolderByPath(this.resolveNoteFolder("weekly"));
+  }
+
+  /** 月记存放文件夹（未设置时与日记同目录；不存在时返回 null） */
+  getMonthlyFolder(): TFolder | null {
+    return this.getFolderByPath(this.resolveNoteFolder("monthly"));
   }
 
   /** 在指定文件夹中查找日期匹配的日记文件（精确日期名或“日期 名字”前缀），多篇时返回名字排序第一篇 */
@@ -2739,8 +2802,9 @@ export default class QuickDailyNotePlugin extends Plugin {
 
     for (const child of folder.children) {
       if (child instanceof TFile && child.extension === "md") {
-        // 周记文件（2026-W37 前缀命名）不计入日记日期集合，避免污染打点与统计
+        // 周记（2026-W37 前缀）与月记（2026-10 月记）不计入日记日期集合，避免污染打点与统计
         if (/^\d{4}-W\d{2}(?: |$)/.test(child.basename)) continue;
+        if (/^\d{4}-\d{2} 月记(?: |$)/.test(child.basename)) continue;
         const firstPart = child.basename.split(" ")[0];
         if (firstPart) set.add(firstPart);
       }
@@ -2748,9 +2812,9 @@ export default class QuickDailyNotePlugin extends Plugin {
     return set;
   }
 
-  /** 收集日记文件夹中所有周记文件的周标识集合（用于日历周记列打点） */
+  /** 收集周记文件夹中所有周记文件的周标识集合（用于日历周记列打点） */
   getWeeklyKeySet(): Set<string> {
-    const folder = this.getDiaryFolder();
+    const folder = this.getWeeklyFolder();
     const set = new Set<string>();
     if (!folder) return set;
 
@@ -2763,9 +2827,9 @@ export default class QuickDailyNotePlugin extends Plugin {
     return set;
   }
 
-  /** 在日记文件夹中查找某周的周记（精确“2026-W37.md”或“2026-W37 名字”前缀），多篇时返回名字排序第一篇 */
+  /** 在周记文件夹中查找某周的周记（精确“2026-W37.md”或“2026-W37 名字”前缀），多篇时返回名字排序第一篇 */
   findWeeklyNote(weekKey: string): TFile | null {
-    const folder = this.getDiaryFolder();
+    const folder = this.getWeeklyFolder();
     if (!folder) return null;
     return (
       folder.children
@@ -2786,17 +2850,25 @@ export default class QuickDailyNotePlugin extends Plugin {
    */
   async openOrCreateWeeklyNote(weekKey: string, mondayStr: string) {
     const file = this.findWeeklyNote(weekKey);
+    const monday = moment(mondayStr, this.settings.dateFormat, true);
+    const dateMoment = monday.isValid() ? monday : moment().startOf("isoWeek");
     if (file) {
+      // 修复"周记模板用不了"：模板只在创建时套用，先建后配模板的旧周记
+      // 永远只是被打开。这里对仍是空壳（仅一行一级标题）的周记补套模板。
+      await this.applyTemplateIfStub(file, "weekly", {
+        dateMoment,
+        week: weekKey,
+      });
       void this.app.workspace.getLeaf(false).openFile(file);
       return;
     }
-    await this.createWeeklyNote(weekKey, mondayStr);
+    await this.createWeeklyNote(weekKey, dateMoment);
   }
 
-  /** 创建周记：标题 = 周标识 + “周记”，存放在日记文件夹中，套用周记模板（周记不记天气） */
-  async createWeeklyNote(weekKey: string, mondayStr: string) {
+  /** 创建周记：标题 = 周标识 + “周记”，存放在周记文件夹，套用周记模板（周记不记天气） */
+  async createWeeklyNote(weekKey: string, monday: QdnMoment) {
     const title = `${weekKey} 周记`;
-    const folderPath = normalizePath(this.settings.folder);
+    const folderPath = normalizePath(this.resolveNoteFolder("weekly"));
     const filePath = normalizePath(
       folderPath ? `${folderPath}/${title}.md` : `${title}.md`
     );
@@ -2805,20 +2877,23 @@ export default class QuickDailyNotePlugin extends Plugin {
 
     const existing = this.app.vault.getAbstractFileByPath(filePath);
     if (existing instanceof TFile) {
+      await this.applyTemplateIfStub(existing, "weekly", {
+        dateMoment: monday,
+        week: weekKey,
+      });
       void this.app.workspace.getLeaf(false).openFile(existing);
       new Notice(`周记已存在，已打开：${title}`);
       this.refreshViews();
       return;
     }
 
-    const monday = moment(mondayStr, this.settings.dateFormat, true);
     const initialContent =
       (await this.getTemplateContent(
         this.settings.weeklyTemplateEnabled,
         this.settings.weeklyTemplatePath,
         {
           title,
-          dateMoment: monday.isValid() ? monday : moment(),
+          dateMoment: monday,
           week: weekKey,
         }
       )) ?? `# ${title}\n`;
@@ -2829,16 +2904,174 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.refreshViews();
   }
 
+  // ------------------------------------------------------------
+  // 月记：一月一篇，命名“2026-10 月记”，存放在月记文件夹
+  // ------------------------------------------------------------
+
+  /** 收集月记文件夹中所有月记文件的月标识集合（用于日历标题打点） */
+  getMonthlyKeySet(): Set<string> {
+    const folder = this.getMonthlyFolder();
+    const set = new Set<string>();
+    if (!folder) return set;
+
+    for (const child of folder.children) {
+      if (child instanceof TFile && child.extension === "md") {
+        const matched = child.basename.match(/^(\d{4}-\d{2})(?: |$)/);
+        if (matched && matched[1]) set.add(matched[1]);
+      }
+    }
+    return set;
+  }
+
+  /** 在月记文件夹中查找某月的月记（精确“2026-10.md”或“2026-10 名字”前缀），多篇时返回名字排序第一篇 */
+  findMonthlyNote(monthKey: string): TFile | null {
+    const folder = this.getMonthlyFolder();
+    if (!folder) return null;
+    return (
+      folder.children
+        .filter(
+          (child): child is TFile =>
+            child instanceof TFile &&
+            child.extension === "md" &&
+            (child.name === `${monthKey}.md` || child.name.startsWith(`${monthKey} `))
+        )
+        .sort((a, b) => a.name.localeCompare(b.name))[0] ?? null
+    );
+  }
+
   /**
-   * 读取模板内容并替换占位符（新建日记/周记时用）：
+   * 打开或创建某月的月记：已有月记直接打开（空壳补套模板），没有则直接创建。
+   * monthStartStr 为该月 1 日的日期字符串（dateFormat 格式），供模板占位符使用。
+   */
+  async openOrCreateMonthlyNote(monthKey: string, monthStartStr: string) {
+    const start = moment(monthStartStr, this.settings.dateFormat, true);
+    const dateMoment = start.isValid() ? start : moment().startOf("month");
+    const file = this.findMonthlyNote(monthKey);
+    if (file) {
+      await this.applyTemplateIfStub(file, "monthly", {
+        dateMoment,
+        month: monthKey,
+      });
+      void this.app.workspace.getLeaf(false).openFile(file);
+      return;
+    }
+    await this.createMonthlyNote(monthKey, dateMoment);
+  }
+
+  /** 创建月记：标题 = 月标识 + “月记”，存放在月记文件夹，套用月记模板（月记不记天气） */
+  async createMonthlyNote(monthKey: string, monthStart: QdnMoment) {
+    const title = `${monthKey} 月记`;
+    const folderPath = normalizePath(this.resolveNoteFolder("monthly"));
+    const filePath = normalizePath(
+      folderPath ? `${folderPath}/${title}.md` : `${title}.md`
+    );
+
+    await this.ensureFolder(folderPath);
+
+    const existing = this.app.vault.getAbstractFileByPath(filePath);
+    if (existing instanceof TFile) {
+      await this.applyTemplateIfStub(existing, "monthly", {
+        dateMoment: monthStart,
+        month: monthKey,
+      });
+      void this.app.workspace.getLeaf(false).openFile(existing);
+      new Notice(`月记已存在，已打开：${title}`);
+      this.refreshViews();
+      return;
+    }
+
+    const initialContent =
+      (await this.getTemplateContent(
+        this.settings.monthlyTemplateEnabled,
+        this.settings.monthlyTemplatePath,
+        {
+          title,
+          dateMoment: monthStart,
+          month: monthKey,
+        }
+      )) ?? `# ${title}\n`;
+
+    const file = await this.app.vault.create(filePath, initialContent);
+    void this.app.workspace.getLeaf(false).openFile(file);
+    new Notice(`已创建月记：${title}`);
+    this.refreshViews();
+  }
+
+  /** 模板种类中文名（提示文案用） */
+  private static readonly TEMPLATE_KIND_NAME: Record<
+    "daily" | "weekly" | "monthly",
+    string
+  > = { daily: "日记", weekly: "周记", monthly: "月记" };
+
+  /**
+   * 已有笔记仍是插件生成的空壳（内容仅一行一级标题）且对应模板已启用时，
+   * 用模板内容替换空壳。日记/周记/月记都是“先建后配模板”的典型场景：
+   * 旧逻辑里已有文件直接打开，模板永远不会套上（周记模板“用不了”的根因）。
+   * 只改写插件自己生成的空壳（内容恰好等于“# 文件名”），绝不动用户内容。
+   */
+  private async applyTemplateIfStub(
+    file: TFile,
+    kind: "daily" | "weekly" | "monthly",
+    vars: { dateMoment: QdnMoment; week?: string; month?: string }
+  ): Promise<boolean> {
+    const enabled =
+      kind === "weekly"
+        ? this.settings.weeklyTemplateEnabled
+        : kind === "monthly"
+          ? this.settings.monthlyTemplateEnabled
+          : this.settings.dailyTemplateEnabled;
+    const templatePath =
+      kind === "weekly"
+        ? this.settings.weeklyTemplatePath
+        : kind === "monthly"
+          ? this.settings.monthlyTemplatePath
+          : this.settings.dailyTemplatePath;
+    const kindName = QuickDailyNotePlugin.TEMPLATE_KIND_NAME[kind];
+    if (!enabled) return false;
+    if (!templatePath.trim()) {
+      new Notice(`已启用${kindName}模板，但未填写模板文件路径`);
+      return false;
+    }
+
+    const stub = `# ${file.basename}`;
+    let current: string;
+    try {
+      current = await this.app.vault.cachedRead(file);
+    } catch (e) {
+      console.warn("Quick Daily Note: 读取笔记判断空壳失败", e);
+      return false;
+    }
+    if (current.trim() !== stub.trim()) return false;
+
+    const tpl = await this.getTemplateContent(true, templatePath, {
+      title: file.basename,
+      dateMoment: vars.dateMoment,
+      week: vars.week,
+      month: vars.month,
+    });
+    if (tpl === null || tpl.trim() === stub.trim()) return false;
+    try {
+      await this.app.vault.modify(file, tpl);
+    } catch (e) {
+      console.warn("Quick Daily Note: 空壳笔记套用模板失败", e);
+      new Notice(`${kindName}模板套用失败，已保留原内容`);
+      return false;
+    }
+    new Notice(`已按${kindName}模板补充内容：${file.basename}`);
+    this.refreshViews();
+    return true;
+  }
+
+  /**
+   * 读取模板内容并替换占位符（新建日记/周记/月记时用）：
    * {{title}} 笔记标题、{{date}} 日期、{{time}} 时间、{{week}} 周标识（周记）、
-   * {{date:格式}} 指定 moment 格式的日期。
+   * {{month}} 月标识（月记）、{{date:格式}} 指定 moment 格式的日期。
    * 未启用/路径为空/文件不存在时返回 null，由调用方回退默认内容。
    */
   private async getTemplateContent(
     enabled: boolean,
     path: string,
-    vars: { title: string; dateMoment: QdnMoment; week?: string }
+    vars: { title: string; dateMoment: QdnMoment; week?: string; month?: string }
   ): Promise<string | null> {
     if (!enabled) return null;
     const trimmed = path.trim();
@@ -2859,6 +3092,7 @@ export default class QuickDailyNotePlugin extends Plugin {
         )
         .replace(/\{\{date\}\}/g, vars.dateMoment.format(this.settings.dateFormat))
         .replace(/\{\{week\}\}/g, vars.week ?? "")
+        .replace(/\{\{month\}\}/g, vars.month ?? "")
         .replace(/\{\{time\}\}/g, timeStr);
       return content;
     } catch (e) {
@@ -3632,7 +3866,21 @@ class CalendarView extends ItemView {
       this.render();
     });
 
-    header.createDiv("qdn-cal-title").setText(this.viewMoment.format("YYYY年M月"));
+    // 标题即月记入口：双击打开/创建当月月记（2026-10 月记），有月记时标题下方显示圆点
+    const monthKey = this.viewMoment.format("YYYY-MM");
+    const monthTitle = header.createDiv("qdn-cal-title qdn-cal-month-title");
+    monthTitle.setAttr("aria-label", `${monthKey} 月记（双击打开/创建）`);
+    const titleText = monthTitle.createSpan();
+    titleText.setText(this.viewMoment.format("YYYY年M月"));
+    if (this.plugin.getMonthlyKeySet().has(monthKey)) {
+      monthTitle.createSpan("qdn-cal-dot");
+    }
+    monthTitle.addEventListener("dblclick", () => {
+      void this.plugin.openOrCreateMonthlyNote(
+        monthKey,
+        this.viewMoment.format(this.plugin.settings.dateFormat)
+      );
+    });
 
     const nextBtn = header.createEl("button", { text: "›", cls: "qdn-cal-nav" });
     nextBtn.setAttr("aria-label", "下个月");
@@ -4752,6 +5000,8 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
   private dailyTemplateText: TextComponent | null = null;
   /** 周记模板文件路径输入框引用（选择文件后回填） */
   private weeklyTemplateText: TextComponent | null = null;
+  /** 月记模板文件路径输入框引用（选择文件后回填） */
+  private monthlyTemplateText: TextComponent | null = null;
 
   constructor(app: App, plugin: QuickDailyNotePlugin) {
     super(app, plugin);
@@ -4816,7 +5066,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("快捷日记设置").setHeading();
 
     new Setting(containerEl)
-      .setName("存放位置")
+      .setName("日记存放位置")
       .setDesc("日记文件的存放文件夹，留空则存放在库根目录（例如：日记/工作）")
       .addText((text) =>
         text
@@ -4824,6 +5074,32 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.folder)
           .onChange(async (value) => {
             this.plugin.settings.folder = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("周记存放位置")
+      .setDesc("周记（2026-W41 周记）的存放文件夹，留空则与日记同目录（例如：日记/周记）")
+      .addText((text) =>
+        text
+          .setPlaceholder("留空则与日记同目录")
+          .setValue(this.plugin.settings.weeklyFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.weeklyFolder = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("月记存放位置")
+      .setDesc("月记（2026-10 月记）的存放文件夹，留空则与日记同目录（例如：日记/月记）")
+      .addText((text) =>
+        text
+          .setPlaceholder("留空则与日记同目录")
+          .setValue(this.plugin.settings.monthlyFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.monthlyFolder = value.trim();
             await this.plugin.saveSettings();
           })
       );
@@ -4880,7 +5156,7 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("启用周记模板")
-      .setDesc("创建周记（双击日历「周记」列）时套用模板文件内容。额外支持 {{week}} 周标识（如 2026-W37），{{date}} 为该周周一的日期。")
+      .setDesc("创建周记（双击日历「周记」列或命令「打开/创建本周周记」）时套用模板文件内容。额外支持 {{week}} 周标识（如 2026-W41），{{date}} 为该周周一的日期。已存在但仍是空壳（只有一行标题）的周记，再次打开时会自动补上模板内容。")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.weeklyTemplateEnabled)
@@ -4909,6 +5185,41 @@ class QuickDailyNoteSettingTab extends PluginSettingTab {
             this.plugin.settings.weeklyTemplatePath = path;
             void this.plugin.saveSettings();
             this.weeklyTemplateText?.setValue(path);
+          }).open();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("启用月记模板")
+      .setDesc("创建月记（双击日历标题或命令「打开/创建本月月记」）时套用模板文件内容。额外支持 {{month}} 月标识（如 2026-10），{{date}} 为当月 1 日。已存在但仍是空壳的月记，再次打开时会自动补上模板内容。")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.monthlyTemplateEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.monthlyTemplateEnabled = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("月记模板文件")
+      .setDesc("vault 内相对路径的 Markdown 文件，可点击右侧按钮从库内选择。")
+      .addText((text) => {
+        this.monthlyTemplateText = text;
+        text
+          .setPlaceholder("模板/月记模板.md")
+          .setValue(this.plugin.settings.monthlyTemplatePath)
+          .onChange(async (value) => {
+            this.plugin.settings.monthlyTemplatePath = value.trim();
+            await this.plugin.saveSettings();
+          });
+      })
+      .addButton((btn) =>
+        btn.setButtonText("选择文件").setCta().onClick(() => {
+          new FileSuggestModal(this.app, ["md"], "搜索库内 Markdown 文件…", (path) => {
+            this.plugin.settings.monthlyTemplatePath = path;
+            void this.plugin.saveSettings();
+            this.monthlyTemplateText?.setValue(path);
           }).open();
         })
       );

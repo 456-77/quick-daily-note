@@ -78,6 +78,20 @@
   font-weight: 600;
 }
 
+/* 月记标题：双击打开/创建当月月记，圆点表示当月已有月记 */
+.qdn-cal-month-title {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: default;
+  padding: 0 10px;
+  border-radius: 4px;
+}
+
+.qdn-cal-month-title:hover {
+  color: var(--text-accent);
+}
+
 .qdn-cal-nav {
   background: transparent;
   border: none;

@@ -375,8 +375,14 @@ export default class QuickDailyNotePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this.migrateTodos();
-    // 等布局就绪后再应用背景，避免加载早期 vault 文件解析不完全导致误判
-    this.app.workspace.onLayoutReady(() => this.applyBackground());
+    // 等布局就绪后再应用背景，避免加载早期 vault 文件解析不完全导致误判。
+    // 插件在布局就绪后被开关/热重载时，onLayoutReady 不会再次触发；这里直接判断
+    // 一次，避免重载后背景设置失效（表现为 qdn-bg-image 类没有加上）。
+    if (this.app.workspace.layoutReady) {
+      this.applyBackground();
+    } else {
+      this.app.workspace.onLayoutReady(() => this.applyBackground());
+    }
 
     this.addRibbonIcon("calendar-plus", "快捷日记", (evt) => {
       this.showMainMenu(evt);
@@ -473,6 +479,12 @@ export default class QuickDailyNotePlugin extends Plugin {
     document.addEventListener("mouseover", this.handleCodeBlockHover);
     this.registerEvent(this.app.workspace.on("layout-change", () => this.processRendered()));
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.processRendered()));
+    // 窗口尺寸变化时重算顶栏壁纸帧的几何，保证与主背景的接缝对齐
+    this.registerEvent(
+      this.app.workspace.on("resize", () => {
+        if (document.body.classList.contains("qdn-bg-image")) this.updateTitlebarBackground();
+      })
+    );
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
         window.setTimeout(() => this.processRendered(), 200);
@@ -557,6 +569,10 @@ export default class QuickDailyNotePlugin extends Plugin {
     document.body.style.removeProperty("--qdn-bg-pos-y");
     document.body.style.removeProperty("--qdn-bg-scale");
     document.body.style.removeProperty("--qdn-bg-fit");
+    document.body.style.removeProperty("--qdn-bg-titlebar");
+    document.body.style.removeProperty("--qdn-titlebar-bg-size");
+    document.body.style.removeProperty("--qdn-titlebar-bg-pos");
+    this.stopTitlebarFrameLoop();
     this.destroyBgVideo();
   }
 
@@ -1088,8 +1104,8 @@ export default class QuickDailyNotePlugin extends Plugin {
     const path = s.bgImagePath.trim();
     const enabled = s.bgEnabled && path.length > 0;
     document.body.toggleClass("qdn-bg-image", enabled);
-    // 背景层从标题栏下方开始：多轮实测确认覆盖层只要与拖拽区（标题栏等）区域重叠，
-    // 无论 z-index / 透明度都会使 Electron 窗口拖拽失效；标题栏保持原生主题色可拖
+    // 背景层从标题栏下方开始：顶栏改用一张不透明的「壁纸玻璃帧」做背景
+    // （updateTitlebarBackground），这样顶栏有内容、空白处仍可拖动窗口。
     const titlebar = document.querySelector<HTMLElement>(".titlebar");
     document.body.style.setProperty(
       "--qdn-bg-top",
@@ -1112,6 +1128,8 @@ export default class QuickDailyNotePlugin extends Plugin {
       document.body.style.removeProperty("--qdn-bg-pos-y");
       document.body.style.removeProperty("--qdn-bg-scale");
       document.body.style.removeProperty("--qdn-bg-fit");
+      document.body.style.removeProperty("--qdn-bg-titlebar");
+      this.stopTitlebarFrameLoop();
       this.destroyBgVideo();
       return;
     }
@@ -1121,18 +1139,23 @@ export default class QuickDailyNotePlugin extends Plugin {
       console.warn("Quick Daily Note: 背景文件不存在", path);
       new Notice("背景文件不存在，请检查设置中的图片路径");
       document.body.toggleClass("qdn-bg-image", false);
+      document.body.style.removeProperty("--qdn-bg-titlebar");
+      this.stopTitlebarFrameLoop();
       this.destroyBgVideo();
       return;
     }
     const url = this.app.vault.adapter.getResourcePath(normalizePath(path));
     const bgFile = file;
     if (VIDEO_EXTENSIONS.has(bgFile.extension.toLowerCase())) {
-      // 动态壁纸：视频元素承载，其余调节变量照常注入
+      // 动态壁纸：视频元素承载，其余调节变量照常注入；顶栏定时取帧
       document.body.style.removeProperty("--qdn-bg-url");
       this.showBgVideo(url);
+      this.startTitlebarFrameLoop();
     } else {
       this.destroyBgVideo();
+      this.stopTitlebarFrameLoop();
       document.body.style.setProperty("--qdn-bg-url", `url("${url}")`);
+      this.updateTitlebarBackground();
     }
     document.body.style.setProperty("--qdn-bg-opacity", String(s.bgOpacity));
     document.body.style.setProperty("--qdn-bg-blur", `${s.bgBlur}px`);
@@ -1146,6 +1169,12 @@ export default class QuickDailyNotePlugin extends Plugin {
 
   /** 动态壁纸视频元素 */
   private bgMediaEl: HTMLVideoElement | null = null;
+
+  /** 顶栏玻璃帧定时器（动态壁纸每 3 秒取一帧） */
+  private bgTitlebarTimer: number | null = null;
+
+  /** 图片背景的缓存 Image（用于读取自然尺寸，计算顶栏几何） */
+  private bgTitlebarImg: HTMLImageElement | null = null;
 
   /** 创建并播放动态壁纸视频 */
   private showBgVideo(url: string): void {
@@ -1174,6 +1203,141 @@ export default class QuickDailyNotePlugin extends Plugin {
     this.bgMediaEl.removeAttribute("src");
     this.bgMediaEl.remove();
     this.bgMediaEl = null;
+  }
+
+  private stopTitlebarFrameLoop(): void {
+    if (this.bgTitlebarTimer !== null) {
+      window.clearInterval(this.bgTitlebarTimer);
+      this.bgTitlebarTimer = null;
+    }
+  }
+
+  /** 动态壁纸：立即取一帧，之后每 3 秒更新顶栏背景 */
+  private startTitlebarFrameLoop(): void {
+    this.stopTitlebarFrameLoop();
+    this.updateTitlebarBackground();
+    this.bgTitlebarTimer = window.setInterval(() => {
+      this.updateTitlebarBackground();
+    }, 3000);
+  }
+
+  /**
+   * 生成顶栏壁纸帧：视频取当前帧导出不透明 JPEG，图片直接用资源 URL；
+   * 几何（size/pos）由 applyTitlebarGeometry 按主背景的 cover 渲染计算，
+   * 让顶栏这条带正好是主背景向上延续的部分，和下方壁纸无缝对齐。
+   * 明暗/模糊由 CSS 在 ::before 上套与主背景相同的滤镜和透明度。
+   *
+   * 为什么不像主背景那样把视频层直接铺到顶栏：顶栏是窗口拖拽区，透明层/覆盖层会让
+   * 空白处无法拖动窗口（标签头有独立拖拽区，所以之前只有标签头能拖）。这里让顶栏
+   * 自己持有不透明 background-image，拖拽区始终有内容；动态壁纸定期换帧，
+   * 观感接近实时。
+   */
+  private updateTitlebarBackground(): void {
+    const s = this.settings;
+    const path = s.bgImagePath.trim();
+    if (!document.body.classList.contains("qdn-bg-image") || !s.bgEnabled || !path) {
+      document.body.style.removeProperty("--qdn-bg-titlebar");
+      document.body.style.removeProperty("--qdn-titlebar-bg-size");
+      document.body.style.removeProperty("--qdn-titlebar-bg-pos");
+      return;
+    }
+    const ext = path.split(".").pop()?.toLowerCase() ?? "";
+    if (VIDEO_EXTENSIONS.has(ext)) {
+      const video = this.bgMediaEl;
+      if (!video || video.readyState < 2 || video.videoWidth <= 0) return;
+      const width = 960;
+      const height = Math.max(1, Math.round((width * video.videoHeight) / video.videoWidth));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      try {
+        // 模糊/亮度等滤镜由 CSS 在 ::before 上与主背景保持一致，这里只取原始帧
+        ctx.drawImage(video, 0, 0, width, height);
+        document.body.style.setProperty(
+          "--qdn-bg-titlebar",
+          `url("${canvas.toDataURL("image/jpeg", 0.72)}")`
+        );
+      } catch {
+        // app:// 资源被 canvas 视为跨域时 toDataURL 会抛错；退回纯色顶栏
+        document.body.style.removeProperty("--qdn-bg-titlebar");
+        return;
+      }
+      const rect = video.getBoundingClientRect();
+      this.applyTitlebarGeometry(video.videoWidth, video.videoHeight, {
+        x: rect.x,
+        y: rect.y,
+        w: rect.width,
+        h: rect.height,
+      });
+      return;
+    }
+    const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
+    if (!file || !(file instanceof TFile)) {
+      document.body.style.removeProperty("--qdn-bg-titlebar");
+      return;
+    }
+    const url = this.app.vault.adapter.getResourcePath(normalizePath(path));
+    const titlebarH = document.querySelector<HTMLElement>(".titlebar")?.offsetHeight ?? 0;
+    const imageRect = () => {
+      const scale = s.bgScale / 100;
+      const boxH = Math.max(1, window.innerHeight - titlebarH);
+      return {
+        x: (window.innerWidth - window.innerWidth * scale) / 2,
+        y: titlebarH + (boxH - boxH * scale) / 2,
+        w: window.innerWidth * scale,
+        h: boxH * scale,
+      };
+    };
+    const apply = (w: number, h: number) => {
+      if (!w || !h) return;
+      this.applyTitlebarGeometry(w, h, imageRect());
+      document.body.style.setProperty("--qdn-bg-titlebar", `url("${url}")`);
+    };
+    const cached = this.bgTitlebarImg?.getAttribute("src") === url ? this.bgTitlebarImg : null;
+    if (cached) {
+      apply(cached.naturalWidth, cached.naturalHeight);
+      return;
+    }
+    const image = new Image();
+    image.onload = () => {
+      this.bgTitlebarImg = image;
+      apply(image.naturalWidth, image.naturalHeight);
+    };
+    image.src = url;
+  }
+
+  /**
+   * 顶栏壁纸帧的几何对齐：主背景按 cover + object-position 渲染在 bgRect 里，
+   * 顶栏（主背景上方的 titlebarH 高度）显示的是这张渲染图向上延续的条带。
+   * 这里算出渲染图在视口中的位置，交给 CSS 作为 ::before 的
+   * background-size / background-position，接缝即可对齐。
+   */
+  private applyTitlebarGeometry(
+    srcW: number,
+    srcH: number,
+    rect: { x: number; y: number; w: number; h: number }
+  ): void {
+    if (!srcW || !srcH || !rect.w || !rect.h) return;
+    const titlebar = document.querySelector<HTMLElement>(".titlebar");
+    const scale = Math.max(rect.w / srcW, rect.h / srcH);
+    const renderedW = srcW * scale;
+    const renderedH = srcH * scale;
+    const posX = this.settings.bgPosX / 100;
+    const posY = this.settings.bgPosY / 100;
+    const left = rect.x - (renderedW - rect.w) * posX;
+    const top = rect.y - (renderedH - rect.h) * posY;
+    document.body.style.setProperty("--qdn-titlebar-bg-size", `${renderedW}px ${renderedH}px`);
+    document.body.style.setProperty("--qdn-titlebar-bg-pos", `${left}px ${top}px`);
+  }
+
+  private bgMediaRect(): { x: number; y: number; w: number; h: number } {
+    const r = this.bgMediaEl?.getBoundingClientRect();
+    if (!r || !r.width || !r.height) {
+      return { x: 0, y: 0, w: window.innerWidth, h: Math.max(1, window.innerHeight) };
+    }
+    return { x: r.x, y: r.y, w: r.width, h: r.height };
   }
 
   /** 查找节点及其子树中可增强的图片 */
@@ -3252,34 +3416,85 @@ export default class QuickDailyNotePlugin extends Plugin {
   }
 
   /**
-   * 将源日期未完成待办顺延到目标日期（带"昨日遗留"标记）。
-   * 源日期的未完成项被移走（保留已完成项），避免重复顺延。
+   * 今天之前、仍有未完成待办的日期（从近到远）。
+   *
+   * 顺延提示要回看「所有过去日子」而不是只看昨天：放几天假回来，昨天没有待办，
+   * 只看昨天的话挂起的待办就再也不会被提醒。无法解析的日期键跳过。
    */
-  async carryOverTodos(fromDate: string, toDate: string) {
+  getPastPendingDates(todayStr: string): { date: string; pending: number }[] {
+    const format = this.settings.dateFormat;
+    const todayDate = moment(todayStr, format, true);
+    if (!todayDate.isValid()) return [];
+    const out: { date: string; pending: number }[] = [];
+    for (const [date, items] of Object.entries(this.settings.todos)) {
+      const pending = liveItems(items).filter((i) => !i.done).length;
+      if (pending === 0) continue;
+      const day = moment(date, format, true);
+      if (!day.isValid() || !day.isBefore(todayDate)) continue;
+      out.push({ date, pending });
+    }
+    return out.sort((a, b) =>
+      moment(a.date, format).isBefore(moment(b.date, format)) ? 1 : -1
+    );
+  }
+
+  /**
+   * 把源日期未完成待办顺延到目标日期（只改内存，不落盘）。
+   *
+   * 与 quick-note 一致：源条目打墓碑、目标日建新 id 的新条目（同一个 id 不能
+   * 出现在两个日期里，否则合并时无法判断归属）；已带「[MM-DD 遗留]」前缀的
+   * 保留最早那个日期，不换成源日期；目标已有同文（剥前缀后）则跳过，避免重复
+   * 顺延产生多份。返回处理的未完成条目数（含被跳过、已打墓碑的重复项）。
+   */
+  private carryOverItems(fromDate: string, toDate: string): number {
+    if (fromDate === toDate) return 0;
     const items = this.settings.todos[fromDate] ?? [];
     const pending = liveItems(items).filter((i) => !i.done);
     if (pending.length === 0) return 0;
     const now = Date.now();
     const target = this.settings.todos[toDate] ?? [];
-    // 顺延 = 源日打墓碑 + 目标日建新条目。不能把同一个 id 挪到另一天：
-    // 那样两个日期里会出现同一个 id，合并时无法判断归属。
-    target.push(
-      ...pending.map((i) => ({
-        id: newTodoId(),
-        text: `${this.carryPrefix(fromDate)} ${this.stripCarryPrefix(i.text)}`,
-        done: false,
-        updatedAt: now,
-      }))
-    );
+    const prefix = this.carryPrefix(fromDate);
+    for (const item of pending) {
+      const existing = /^(\[[^\]]*遗留\])/.exec(item.text);
+      const bare = this.stripCarryPrefix(item.text).trim();
+      const text = existing ? `${existing[1]} ${bare}` : `${prefix} ${bare}`;
+      const alreadyThere = target.some(
+        (t) => !t.deleted && this.stripCarryPrefix(t.text).trim() === bare
+      );
+      if (alreadyThere) continue;
+      target.push({ id: newTodoId(), text, done: false, updatedAt: now });
+    }
     this.settings.todos[toDate] = target;
     for (const item of pending) {
       item.deleted = true;
       item.updatedAt = now;
     }
+    return pending.length;
+  }
+
+  /**
+   * 将源日期未完成待办顺延到目标日期（带"遗留"标记）。
+   * 源日期的未完成项被移走（保留已完成项），避免重复顺延。
+   */
+  async carryOverTodos(fromDate: string, toDate: string) {
+    const moved = this.carryOverItems(fromDate, toDate);
+    if (moved === 0) return 0;
     await this.saveSettings();
     this.refreshViews();
     this.markTodosChanged();
-    return pending.length;
+    return moved;
+  }
+
+  /** 一次把今天之前所有日期的未完成待办顺延到目标日期（从近到远逐日处理）。 */
+  async carryOverAllPendingTodos(toDate: string) {
+    const dates = this.getPastPendingDates(toDate).map((row) => row.date);
+    let total = 0;
+    for (const date of dates) total += this.carryOverItems(date, toDate);
+    if (total === 0) return 0;
+    await this.saveSettings();
+    this.refreshViews();
+    this.markTodosChanged();
+    return total;
   }
 
   /**
@@ -3844,6 +4059,15 @@ class CalendarView extends ItemView {
     this.render();
   }
 
+  /** 前缀语法把待办记到别的日子后，选中日与视图月份跟着跳过去。 */
+  private jumpToDate(dateStr: string) {
+    this.selectedDate = dateStr;
+    this.editingIndex = null;
+    const target = moment(dateStr, this.plugin.settings.dateFormat, true);
+    if (target.isValid()) this.viewMoment = target.clone().startOf("month");
+    this.render();
+  }
+
   private render() {
     const { containerEl } = this;
     containerEl.empty();
@@ -3856,10 +4080,10 @@ class CalendarView extends ItemView {
   }
 
   private renderCalendar(root: HTMLElement) {
-    const wrapper = root.createDiv("qdn-calendar");
+    const wrapper = root.createDiv("qdn-card qdn-calendar");
     const header = wrapper.createDiv("qdn-cal-header");
 
-    const prevBtn = header.createEl("button", { text: "‹", cls: "qdn-cal-nav" });
+    const prevBtn = header.createEl("button", { text: "‹", cls: "qdn-cal-nav qdn-mini-btn" });
     prevBtn.setAttr("aria-label", "上个月");
     prevBtn.addEventListener("click", () => {
       this.viewMoment.subtract(1, "month");
@@ -3882,15 +4106,29 @@ class CalendarView extends ItemView {
       );
     });
 
-    const nextBtn = header.createEl("button", { text: "›", cls: "qdn-cal-nav" });
+    const nextBtn = header.createEl("button", { text: "›", cls: "qdn-cal-nav qdn-mini-btn" });
     nextBtn.setAttr("aria-label", "下个月");
     nextBtn.addEventListener("click", () => {
       this.viewMoment.add(1, "month");
       this.render();
     });
 
+    // 回到本月并选中今天：只跳月份的话，当天日记/待办/统计还停在别的日期上
+    const todayBtn = header.createEl("button", {
+      text: "今天",
+      cls: "qdn-cal-today-btn qdn-mini-btn",
+    });
+    todayBtn.setAttr("aria-label", "回到今天并选中");
+    todayBtn.setAttr("title", "回到今天并选中");
+    todayBtn.addEventListener("click", () => {
+      this.viewMoment = moment().startOf("month");
+      this.selectedDate = moment().format(this.plugin.settings.dateFormat);
+      this.editingIndex = null;
+      this.render();
+    });
+
     const grid = wrapper.createDiv("qdn-cal-grid");
-    // 第 1 列：周记列（W，每行行首，对应该行所在周）；连续竖向分隔线由 .qdn-cal-grid::after 绘制
+    // 第 1 列：周记列（W，每行行首，对应该行所在周）
     grid.createDiv("qdn-cal-cell qdn-cal-weekday").setText("W");
     for (const weekday of ["一", "二", "三", "四", "五", "六", "日"]) {
       grid.createDiv("qdn-cal-cell qdn-cal-weekday").setText(weekday);
@@ -3915,6 +4153,7 @@ class CalendarView extends ItemView {
       const weekCell = grid.createDiv("qdn-cal-cell qdn-cal-week-cell");
       weekCell.setText(monday.format("WW").replace(/^0/, ""));
       weekCell.setAttr("aria-label", `${weekKey} 周记（双击打开/创建）`);
+      weekCell.setAttr("title", `${weekKey} 周记（双击打开或创建）`);
       if (weeklySet.has(weekKey)) weekCell.createSpan("qdn-cal-dot");
       weekCell.addEventListener("dblclick", () => {
         void this.plugin.openOrCreateWeeklyNote(weekKey, mondayStr);
@@ -3923,8 +4162,9 @@ class CalendarView extends ItemView {
       for (let col = 0; col < 7; col++) {
         const day = monday.clone().add(col, "day");
         const dateStr = day.format(dateFormat);
-        const cell = grid.createDiv("qdn-cal-cell");
+        const cell = grid.createDiv("qdn-cal-cell qdn-cal-day");
         cell.setText(day.date().toString());
+        cell.setAttr("title", dateStr);
 
         if (day.month() !== this.viewMoment.month()) {
           cell.addClass("qdn-cal-outside");
@@ -3934,8 +4174,10 @@ class CalendarView extends ItemView {
         if (diarySet.has(dateStr)) cell.createSpan("qdn-cal-dot");
 
         cell.addEventListener("click", () => {
-          // 单击仅切换选中日期与待办列表，不打开日记
+          // 单击仅切换选中日期与待办列表，不打开日记；同时退出上一行的编辑态，
+          // 避免按原始下标定位的 editingIndex 落到新日期同下标的待办上
           this.selectedDate = dateStr;
+          this.editingIndex = null;
           this.render();
         });
         cell.addEventListener("dblclick", () => {
@@ -3968,9 +4210,9 @@ class CalendarView extends ItemView {
     }
 
     const stats = wrapper.createDiv("qdn-stats");
-    stats.createSpan().setText(`本月 ${monthCount} 天`);
-    stats.createSpan().setText(`连续 ${streak} 天`);
-    const wordEl = stats.createSpan();
+    stats.createSpan({ cls: "qdn-stat" }).setText(`本月 ${monthCount} 天`);
+    stats.createSpan({ cls: "qdn-stat" }).setText(`连续 ${streak} 天`);
+    const wordEl = stats.createSpan({ cls: "qdn-stat" });
     const todayFile = this.plugin.findDailyNote(this.plugin.getDiaryFolder(), moment().format(dateFormat));
     if (todayFile) {
       wordEl.setText("今日 …");
@@ -3992,11 +4234,11 @@ class CalendarView extends ItemView {
   /** 当天日记列表：显示选中日期创建的所有日记标题，点击跳转；支持同一天多份日记 */
   private renderDayNotes(root: HTMLElement) {
     const notes = this.plugin.findDailyNotes(this.selectedDate);
-    const wrapper = root.createDiv("qdn-day-notes");
+    const wrapper = root.createDiv("qdn-card qdn-day-notes");
     const header = wrapper.createDiv("qdn-day-notes-header");
     header.createSpan({ cls: "qdn-day-notes-title" }).setText(`当天日记（${notes.length}）`);
     header
-      .createEl("button", { text: "＋ 新建", cls: "qdn-day-notes-add" })
+      .createEl("button", { text: "＋ 新建", cls: "qdn-day-notes-add qdn-mini-btn" })
       .addEventListener("click", () => {
         new CreateDailyNoteModal(this.plugin.app, this.plugin, this.selectedDate).open();
       });
@@ -4006,6 +4248,7 @@ class CalendarView extends ItemView {
     }
     for (const file of notes) {
       const row = wrapper.createDiv("qdn-day-note");
+      row.setAttr("title", file.path);
       const nameEl = row.createSpan({ cls: "qdn-day-note-name", text: file.basename });
       nameEl.addEventListener("click", () => {
         void this.plugin.app.workspace.getLeaf(false).openFile(file);
@@ -4048,25 +4291,9 @@ class CalendarView extends ItemView {
   }
 
   private renderTodos(root: HTMLElement) {
-    const wrapper = root.createDiv("qdn-todos");
-
-    // 昨日未完成待办顺延提示（仅今天显示，且今天尚未顺延过）
-    const todayStr = moment().format(this.plugin.settings.dateFormat);
-    if (this.selectedDate === todayStr) {
-      const yesterdayStr = moment().subtract(1, "day").format(this.plugin.settings.dateFormat);
-      const pendingCount = liveItems(this.plugin.settings.todos[yesterdayStr]).filter(
-        (i) => !i.done,
-      ).length;
-      if (pendingCount > 0 && !this.plugin.hasCarriedOver(todayStr)) {
-        const banner = wrapper.createDiv("qdn-carryover");
-        banner.createSpan().setText(`昨天有 ${pendingCount} 项待办未完成`);
-        banner
-          .createEl("button", { text: "顺延到今天", cls: "qdn-carryover-btn" })
-          .addEventListener("click", () => {
-            void this.plugin.carryOverTodos(yesterdayStr, todayStr);
-          });
-      }
-    }
+    const wrapper = root.createDiv("qdn-card qdn-todos");
+    const dateFormat = this.plugin.settings.dateFormat;
+    const todayStr = moment().format(dateFormat);
 
     // 保留原始下标：勾选/编辑/删除回调都靠它定位数组里的条目；
     // 这里同时滤掉墓碑（已删除的条目不渲染）
@@ -4080,16 +4307,38 @@ class CalendarView extends ItemView {
     if (Platform.isMobile) {
       // 移动端空间有限：标题行省去日期（日历已可见）直接显示未完成数，
       // 右侧「+ 新增」按钮（与当天日记的「+ 新建」同位）弹出输入框，省去常驻输入栏
-      dateLabel.createSpan().setText("待办");
+      dateLabel.createSpan({ cls: "qdn-todos-title" }).setText("待办");
       dateLabel.createSpan({ cls: "qdn-todos-pending" }).setText(`${pending} 项未完成`);
       header
-        .createEl("button", { text: "+ 新增", cls: "qdn-todo-new-btn" })
+        .createEl("button", { text: "+ 新增", cls: "qdn-todo-new-btn qdn-mini-btn" })
         .addEventListener("click", () => {
-          new AddTodoModal(this.app, this.plugin, this.selectedDate).open();
+          new AddTodoModal(this.app, this.plugin, this.selectedDate, (date) => {
+            this.jumpToDate(date);
+          }).open();
         });
     } else {
-      dateLabel.createSpan().setText(`待办 · ${this.selectedDate}`);
+      dateLabel.createSpan({ cls: "qdn-todos-title" }).setText(`待办 · ${this.selectedDate}`);
       header.createSpan({ cls: "qdn-todos-count" }).setText(`${pending} 项未完成`);
+    }
+
+    // 顺延提示：回看今天之前所有有未完成待办的日子（不只昨天），
+    // 仅在选中今天且今天尚未顺延过时出现
+    if (this.selectedDate === todayStr && !this.plugin.hasCarriedOver(todayStr)) {
+      const past = this.plugin.getPastPendingDates(todayStr);
+      const total = past.reduce((sum, row) => sum + row.pending, 0);
+      if (total > 0) {
+        const label =
+          past.length === 1
+            ? `${moment(past[0].date, dateFormat, true).format("MM-DD")} 有 ${past[0].pending} 项待办未完成`
+            : `过去 ${past.length} 天共有 ${total} 项待办未完成`;
+        const banner = wrapper.createDiv("qdn-carryover");
+        banner.createSpan().setText(label);
+        banner
+          .createEl("button", { text: "顺延到今天", cls: "qdn-carryover-btn qdn-mini-btn" })
+          .addEventListener("click", () => {
+            void this.plugin.carryOverAllPendingTodos(todayStr);
+          });
+      }
     }
 
     const list = wrapper.createDiv("qdn-todo-list");
@@ -4195,25 +4444,45 @@ class CalendarView extends ItemView {
 
     const inputRow = wrapper.createDiv("qdn-todo-add");
     const input = inputRow.createEl("textarea", {
-      attr: { rows: "1", placeholder: "添加待办，回车确认，Shift+Enter 换行" },
+      attr: {
+        rows: "1",
+        placeholder:
+          "添加待办：Enter 确认 · Shift+Enter 换行 · 前缀「明天 / 10-01 / 2026-10-01」记到那天",
+      },
     });
-    input.addEventListener("input", () => autosizeTextarea(input));
+    autosizeTextarea(input);
+    const addBtn = inputRow.createEl("button", {
+      text: "添加",
+      cls: "qdn-mini-btn",
+    });
+    addBtn.disabled = true;
+    const submit = () => {
+      const text = input.value.trim();
+      if (!text) return;
+      // 日期前缀：明天 / 后天 / 10-01 / 2026-10-01 → 记到那天并跳过去
+      const scheduled = parseTodoDateInput(text, dateFormat, todayStr);
+      if (scheduled) {
+        void this.plugin.addTodo(scheduled.date, scheduled.text);
+        this.jumpToDate(scheduled.date);
+      } else {
+        void this.plugin.addTodo(this.selectedDate, text);
+      }
+      input.value = "";
+      autosizeTextarea(input);
+      addBtn.disabled = true;
+    };
+    input.addEventListener("input", () => {
+      autosizeTextarea(input);
+      addBtn.disabled = !input.value.trim();
+    });
     input.addEventListener("keydown", (evt) => {
       if (evt.isComposing) return;
       if (evt.key === "Enter" && !evt.shiftKey) {
         evt.preventDefault();
-        void this.plugin.addTodo(this.selectedDate, input.value);
-        input.value = "";
-        autosizeTextarea(input);
+        submit();
       }
     });
-    inputRow
-      .createEl("button", { text: "添加", cls: "qdn-todo-add-btn" })
-      .addEventListener("click", () => {
-        void this.plugin.addTodo(this.selectedDate, input.value);
-        input.value = "";
-        autosizeTextarea(input);
-      });
+    addBtn.addEventListener("click", submit);
   }
 }
 
@@ -4223,15 +4492,80 @@ function autosizeTextarea(el: HTMLTextAreaElement) {
   el.style.height = `${el.scrollHeight + 2}px`;
 }
 
-/** 新增待办弹窗（移动端）：回车连续添加，Esc 关闭 */
+/**
+ * 解析待办输入里的日期前缀（与 quick-note 的 parseTodoDateInput 一致）：
+ * - 相对：`明天 买礼物` / `后天 交房租` / `大后天 面试`；
+ * - 绝对：`2026-10-01 出发` 或 `10-01 出发`（补当前年份）。
+ *
+ * 只有前缀没有正文的（`2026-10-01`）更像用户就想记这串字，不算日期语法。
+ * 返回的 date 已按 dateFormat 格式化；不是日期语法返回 null。
+ */
+function parseTodoDateInput(
+  text: string,
+  dateFormat: string,
+  today: string
+): { date: string; text: string } | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const base = moment(today, dateFormat, true).isValid()
+    ? moment(today, dateFormat)
+    : moment();
+
+  // 相对词允许不写空格（「明天买礼物」）；数字日期必须有空格，
+  // 否则「3-5 折优惠」这类文本容易被误判。
+  const relative = /^(明天|后天|大后天)\s*(.+)$/.exec(trimmed);
+  if (relative) {
+    const body = relative[2].trim();
+    if (!body) return null;
+    const days = relative[1] === "明天" ? 1 : relative[1] === "后天" ? 2 : 3;
+    return { date: base.clone().add(days, "day").format(dateFormat), text: body };
+  }
+
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const absolute = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(.+))?$/.exec(trimmed);
+  if (absolute) {
+    const body = (absolute[4] ?? "").trim();
+    if (!body) return null;
+    const iso = `${absolute[1]}-${pad(Number(absolute[2]))}-${pad(Number(absolute[3]))}`;
+    const candidate = moment(iso, "YYYY-MM-DD", true);
+    // 严格校验：2026-13-45 / 2026-02-30 这类不是日期，当普通文本待办
+    if (!candidate.isValid() || candidate.format("YYYY-MM-DD") !== iso) return null;
+    return { date: candidate.format(dateFormat), text: body };
+  }
+
+  const monthDay = /^(\d{1,2})-(\d{1,2})(?:\s+(.+))?$/.exec(trimmed);
+  if (monthDay) {
+    const body = (monthDay[3] ?? "").trim();
+    if (!body) return null;
+    const month = Number(monthDay[1]);
+    const day = Number(monthDay[2]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    const iso = `${base.format("YYYY")}-${pad(month)}-${pad(day)}`;
+    const candidate = moment(iso, "YYYY-MM-DD", true);
+    if (!candidate.isValid() || candidate.format("YYYY-MM-DD") !== iso) return null;
+    return { date: candidate.format(dateFormat), text: body };
+  }
+
+  return null;
+}
+
+/** 新增待办弹窗（移动端）：回车连续添加，Esc 关闭；支持与桌面输入框相同的日期前缀 */
 class AddTodoModal extends Modal {
   private plugin: QuickDailyNotePlugin;
   private dateStr: string;
+  private onJump?: (date: string) => void;
 
-  constructor(app: App, plugin: QuickDailyNotePlugin, dateStr: string) {
+  constructor(
+    app: App,
+    plugin: QuickDailyNotePlugin,
+    dateStr: string,
+    onJump?: (date: string) => void
+  ) {
     super(app);
     this.plugin = plugin;
     this.dateStr = dateStr;
+    this.onJump = onJump;
   }
 
   onOpen() {
@@ -4239,12 +4573,23 @@ class AddTodoModal extends Modal {
     this.contentEl.addClass("qdn-add-todo-modal");
     const input = this.contentEl.createEl("textarea", {
       cls: "qdn-add-todo-input",
-      attr: { rows: "1", placeholder: "输入待办内容，回车连续添加，Shift+Enter 换行" },
+      attr: {
+        rows: "1",
+        placeholder: "输入待办，回车连续添加；可用「明天 / 10-01」开头记到那天",
+      },
     });
     const submit = () => {
       const value = input.value.trim();
       if (!value) return;
-      void this.plugin.addTodo(this.dateStr, value);
+      // 与面板输入框同一套前缀语法；基准是实际今天，不是弹窗打开的日期
+      const format = this.plugin.settings.dateFormat;
+      const scheduled = parseTodoDateInput(value, format, moment().format(format));
+      if (scheduled) {
+        void this.plugin.addTodo(scheduled.date, scheduled.text);
+        this.onJump?.(scheduled.date);
+      } else {
+        void this.plugin.addTodo(this.dateStr, value);
+      }
       input.value = "";
       autosizeTextarea(input);
       input.focus();

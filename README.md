@@ -8,16 +8,17 @@ A daily-journal and todo companion plugin for Obsidian: one-click daily notes, a
 
 ### 📝 Daily Notes
 - Click the calendar icon in the ribbon, or run the command "New daily note (enter name)" to create a note titled "date + name" — the folder and date format are configurable. If a note with the same name exists, it opens directly.
-- In the sidebar calendar panel, double-click a date to open or create that day's note.
-- **Weekly notes** — the calendar has a "W" (weekly) column on the left of the day grid, separated by a divider, one cell per week row: double-click it to open that week's note (named by ISO week, e.g. "2026-W37 周记") or create it for a weekly study summary. A single click changes nothing — the selected date, the todo list and the day-note list stay untouched; weeks that already have a note show a dot. A command "Open/create this week's note" does the same from the command palette (handy on mobile, where double-click is unavailable).
+- In the sidebar calendar panel, double-click a date to open or create that day's note. The **Today** button in the panel header jumps back to the current month and selects today.
+- **Weekly notes** — the calendar has a "W" (weekly) column on the left of the day grid, one cell per week row: double-click it to open that week's note (named by ISO week, e.g. "2026-W37 周记") or create it for a weekly study summary. A single click changes nothing — the selected date, the todo list and the day-note list stay untouched; weeks that already have a note show a dot. A command "Open/create this week's note" does the same from the command palette (handy on mobile, where double-click is unavailable).
 - **Monthly notes** — double-click the calendar title (e.g. "2026年10月") to open or create that month's note (named "2026-10 月记"); months that already have one show a dot under the title. A command "Open/create this month's note" is available too.
 - **Separate folders** — weekly and monthly notes can live in their own folders (settings: weekly / monthly storage location); when unset they are stored next to the daily notes.
 - **Templates** — optionally apply a Markdown template when creating daily, weekly or monthly notes (toggle in settings, template file picked from the vault). Placeholders are replaced on creation: `{{title}}`, `{{date}}`, `{{time}}`, `{{date:FORMAT}}`, `{{week}}` (weekly notes only, e.g. 2026-W37; there `{{date}}` is the week's Monday) and `{{month}}` (monthly notes only, e.g. 2026-10; there `{{date}}` is the 1st of the month). Notes that exist as an empty stub (just the auto-generated heading) get the template filled in when opened — so notes created before enabling a template pick it up too.
 
 ### ✅ Calendar & Todos
 - The calendar panel manages todos per day: add with the input box (Enter), check off, double-click to edit text, or open the row-end ⋯ menu for edit / copy / delete.
+- **File a todo under another day** — start the text with `明天`, `后天`, `10-01` or `2026-10-01`, and the todo is filed under that date (the panel jumps there).
 - **Multi-line todos** — the add box and the todo editor are auto-growing text areas that wrap long text (no more moving the cursor horizontally through a single line): Enter confirms / saves, Shift+Enter inserts a newline, and multi-line todo text renders with line breaks preserved (the weekly review flattens them into single checklist lines).
-- When yesterday has unfinished todos, a "Carry over to today" banner appears at the top — one click moves them to today, marked as "carried over".
+- When earlier days have unfinished todos, a "Carry over to today" banner appears at the top — one click moves all of them to today, marked as "carried over".
 - Below the calendar: stats for this month's diary days, consecutive diary days, and today's word count.
 - **Multiple daily notes per day** — click a date in the calendar panel to list all daily notes created for that day; click a title to jump to that note, or use ＋ New to create another one for the same day.
 

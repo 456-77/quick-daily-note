@@ -48,12 +48,103 @@
   gap: 8px;
 }
 
-/* 日历面板 */
+/* 日历面板（对齐 quick-note：卡片化布局 + 语义变量；颜色全部跟随 Obsidian 主题） */
+body {
+  /* 面板/弹窗共用的设计变量：想统一改配色/圆角，只动这里 */
+  --qdn-card-bg: var(--background-primary);
+  --qdn-card-border: var(--background-modifier-border);
+  --qdn-chip-bg: color-mix(in srgb, var(--text-normal) 7%, transparent);
+  --qdn-hover: var(--background-modifier-hover);
+  --qdn-accent: var(--interactive-accent);
+  --qdn-accent-text: var(--text-accent);
+  --qdn-accent-soft: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+  --qdn-on-accent: var(--text-on-accent);
+  --qdn-warn-text: var(--text-warning, color-mix(in srgb, var(--color-yellow, #d9a400) 65%, var(--text-normal)));
+  --qdn-warn-bg: color-mix(in srgb, var(--color-yellow, #d9a400) 14%, transparent);
+  --qdn-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 4px 14px rgba(0, 0, 0, 0.08);
+  --qdn-card-shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.1), 0 16px 44px rgba(0, 0, 0, 0.16);
+}
+
 .qdn-panel {
   /* 面板内容超高时在面板内部滚动（.workspace-leaf-content 原生 overflow:hidden 会直接裁剪底部） */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   overflow-y: auto;
-  padding: 8px 12px 12px;
+  padding: 8px 10px 12px;
   user-select: text;
+}
+
+/* 滚动条不占布局位：内容增减时原生滚动条弹出/收起，会把面板内容横向挤动几像素。
+   与 quick-note 一致——滚动本身照旧（滚轮/触摸/拖动），只是不画指示条；
+   面板内所有滚动容器（含待办列表、多行输入框）一起隐藏。 */
+.qdn-panel,
+.qdn-panel * {
+  scrollbar-width: none;
+}
+
+.qdn-panel::-webkit-scrollbar,
+.qdn-panel *::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* 面板内的三个功能区块都是卡片。
+   刻意不做 hover 位移：transform 会改变 fixed 后代的包含块，待办/日记录的
+   ⋯ 菜单按视口坐标定位，会直接飞走。层级感交给阴影就够了。 */
+.qdn-card {
+  flex-shrink: 0;
+  background: var(--qdn-card-bg);
+  border: 1px solid var(--qdn-card-border);
+  border-radius: 14px;
+  padding: 10px;
+  box-shadow: var(--qdn-card-shadow);
+  transition: box-shadow 0.15s ease;
+}
+
+.qdn-card:hover {
+  box-shadow: var(--qdn-card-shadow-hover);
+}
+
+/* 面板里的迷你按钮（月份箭头/今天/新建/添加/顺延）。
+   选择器带 .qdn-panel 是为了压过 Obsidian 原生 button 的底色、边框、高度。 */
+.qdn-panel .qdn-mini-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex-shrink: 0;
+  height: auto;
+  min-height: 0;
+  padding: 3px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: transparent;
+  background-image: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  box-shadow: none;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  transition: background-color 0.13s ease, color 0.13s ease, transform 0.1s ease;
+}
+
+.qdn-panel .qdn-mini-btn:hover:not(:disabled) {
+  background: var(--qdn-hover);
+  color: var(--text-normal);
+}
+
+.qdn-panel .qdn-mini-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.qdn-panel .qdn-mini-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* 底部占位：Obsidian 状态栏 position:fixed 悬浮在右下角（实测约 27px 高、可宽达数百 px），
@@ -63,46 +154,57 @@
   height: 40px;
 }
 
-.qdn-calendar {
-  margin-bottom: 16px;
-}
-
 .qdn-cal-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
+  gap: 4px;
 }
 
 .qdn-cal-title {
-  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 13.5px;
+  font-weight: 650;
 }
 
-/* 月记标题：双击打开/创建当月月记，圆点表示当月已有月记 */
+/* 月记标题：双击打开/创建当月月记，圆点表示当月已有月记。
+   圆点绝对定位，避免有/无月记时头部高度（进而整张日历）上下跳。 */
 .qdn-cal-month-title {
-  display: inline-flex;
+  position: relative;
+  display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   cursor: default;
   padding: 0 10px;
-  border-radius: 4px;
+  border-radius: 6px;
 }
 
 .qdn-cal-month-title:hover {
   color: var(--text-accent);
 }
 
-.qdn-cal-nav {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  font-size: 18px;
-  padding: 0 8px;
-  color: var(--text-muted);
+.qdn-cal-month-title > .qdn-cal-dot {
+  position: absolute;
+  left: 50%;
+  bottom: -4px;
+  margin: 0;
+  transform: translateX(-50%);
 }
 
-.qdn-cal-nav:hover {
-  color: var(--text-normal);
+.qdn-cal-nav {
+  flex: none;
+}
+
+.qdn-panel .qdn-cal-today-btn {
+  flex: none;
+  color: var(--qdn-accent-text);
+}
+
+.qdn-panel .qdn-cal-today-btn:hover:not(:disabled) {
+  color: var(--qdn-accent-text);
+  background: var(--qdn-accent-soft);
 }
 
 .qdn-cal-grid {
@@ -111,39 +213,35 @@
   /* 第 1 列为周记列（W），固定宽度，其余 7 列等分 */
   grid-template-columns: 24px repeat(7, 1fr);
   gap: 2px;
-}
-
-/* W 列与日历之间的连续竖向分隔线：整条线画在网格容器上（绝对定位、贯穿全高），
-   不依赖逐格边框，行间隙/行高差异都不会产生断点 */
-.qdn-cal-grid::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  /* 24px 的 W 列 + 2px 间隙的中点 */
-  left: 25px;
-  width: 1px;
-  background: var(--background-modifier-border);
-  pointer-events: none;
+  margin-top: 8px;
 }
 
 .qdn-cal-cell {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 3px 0;
-  border-radius: 4px;
+  justify-content: center;
+  gap: 1px;
+  min-height: 28px;
+  padding: 2px 0;
+  font-size: 12.5px;
+  color: var(--text-normal);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
   cursor: pointer;
-  font-size: 13px;
+  transition: background-color 0.12s ease, color 0.12s ease, transform 0.1s ease;
 }
 
 .qdn-cal-cell:hover {
-  background: var(--background-modifier-hover);
+  background: var(--qdn-hover);
 }
 
 .qdn-cal-weekday {
-  color: var(--text-muted);
-  font-size: 11px;
+  min-height: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-faint);
   cursor: default;
 }
 
@@ -151,60 +249,96 @@
   background: transparent;
 }
 
-.qdn-cal-outside {
+/* 周记格：每行行首（日历左侧），单击不改变选中与待办，双击打开/创建该周周记 */
+.qdn-cal-week-cell {
+  font-size: 10.5px;
   color: var(--text-faint);
 }
 
-.qdn-cal-today {
-  color: var(--text-accent);
-  font-weight: 700;
+.qdn-cal-week-cell:hover {
+  background: var(--qdn-accent-soft);
+  color: var(--qdn-accent-text);
 }
 
+/* 日格固定高度：圆点绝对定位到底部，有没有日记数字都在同一个位置 */
+.qdn-cal-day {
+  position: relative;
+  height: 34px;
+  min-height: 34px;
+  gap: 0;
+}
+
+.qdn-cal-day .qdn-cal-dot {
+  position: absolute;
+  left: 50%;
+  bottom: 4px;
+  margin: 0;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.qdn-cal-day:hover {
+  color: var(--qdn-accent-text);
+}
+
+.qdn-cal-outside {
+  opacity: 0.4;
+}
+
+.qdn-cal-today {
+  color: var(--qdn-accent-text);
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1.5px var(--qdn-accent);
+}
+
+.qdn-cal-day:active {
+  transform: scale(0.94);
+}
+
+/* 选中日是实底：面板上唯一「我在这里」的指示 */
 .qdn-cal-selected,
 .qdn-cal-selected:hover {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
+  background: var(--qdn-accent);
+  color: var(--qdn-on-accent);
+}
+
+.qdn-cal-selected .qdn-cal-dot {
+  background: var(--qdn-on-accent);
 }
 
 .qdn-cal-dot {
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: var(--interactive-accent);
+  background: var(--qdn-accent);
   margin-top: 1px;
 }
 
-/* 周记格：每行行首（日历左侧），单击不改变选中与待办，双击打开/创建该周周记 */
-.qdn-cal-week-cell {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.qdn-cal-week-cell:hover {
-  color: var(--text-accent);
-}
-
 /* 待办事项 */
-.qdn-todos {
-  border-top: 1px solid var(--background-modifier-border);
-  padding-top: 12px;
-}
-
 .qdn-todos-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  font-weight: 600;
-  margin-bottom: 10px;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 2px 6px;
+  font-weight: 400;
 }
 
-.qdn-todos-count {
-  background: var(--background-modifier-hover);
-  border-radius: 10px;
-  padding: 2px 10px;
+.qdn-todos-title {
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 650;
+  letter-spacing: 0.05em;
   color: var(--text-muted);
+}
+
+.qdn-todos-count,
+.qdn-todos-pending {
+  padding: 2px 9px;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--text-muted);
+  background: var(--qdn-chip-bg);
+  border-radius: 999px;
   white-space: nowrap;
 }
 
@@ -221,12 +355,12 @@
    给列表加毛玻璃底衬——模糊抹平背景细节 + 轻微底色保证行内容对比；
    在不透明普通主题下 backdrop 与同色底衬几乎无视觉变化 */
 .qdn-todo-list {
-    max-height: 40vh;
-    overflow-y: auto;
-    padding-right: 4px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 1px;
+  max-height: 230px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 /* 部分主题/CSS 管理器片段会给面板挂一层绝对定位的暗色渐变装饰（如
@@ -240,35 +374,24 @@
 .qdn-todo-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 8px;
-  border-radius: 6px;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 8px;
   width: 100%;
   position: relative;
-  transition: background-color 0.15s ease;
+  font-size: 12.5px;
+  transition: background-color 0.12s ease;
 }
 
 .qdn-todo-item:hover {
-  background: var(--background-modifier-hover);
-}
-
-  .qdn-todo-item.qdn-todo-editing {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    background: var(--background-primary);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-  }
-
-.qdn-todo-item.qdn-todo-completed {
-  background: var(--background-modifier-hover);
+  background: var(--qdn-hover);
 }
 
 .qdn-todo-item input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   margin: 0;
   flex-shrink: 0;
   border: 1.5px solid var(--checkbox-border-color, var(--text-muted));
@@ -305,19 +428,18 @@
   /* 显式三值 + min-width:0：确保文本列占满行内剩余宽度（部分主题下 flex:1 会被覆盖为不拉伸） */
   flex: 1 1 0;
   min-width: 0;
-  font-size: 13px;
+  font-size: 12.5px;
   word-break: break-word;
   /* 多行待办：按换行符折行显示 */
   white-space: pre-wrap;
   user-select: text;
   cursor: text;
-  transition: color 0.15s ease, opacity 0.15s ease;
+  transition: color 0.12s ease;
 }
 
 .qdn-todo-completed .qdn-todo-text {
   text-decoration: line-through;
-  color: var(--text-muted);
-  opacity: 0.7;
+  color: var(--text-faint);
 }
 
 .qdn-todo-more {
@@ -326,18 +448,19 @@
   right: 6px;
   top: 50%;
   transform: translateY(-50%);
+  padding: 1px 6px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: var(--qdn-chip-bg);
+  border: 1px solid var(--qdn-card-border);
+  border-radius: 6px;
+  box-shadow: var(--qdn-card-shadow);
+  cursor: pointer;
   opacity: 0;
   pointer-events: none;
-  background: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
-  color: var(--text-faint);
-  cursor: pointer;
-  font-size: 15px;
-  line-height: 1;
-  padding: 2px 5px;
-  border-radius: 4px;
-  letter-spacing: 1px;
-  transition: color 0.15s ease, background-color 0.15s ease, opacity 0.15s ease;
+  transition: opacity 0.12s ease, color 0.12s ease, background-color 0.12s ease;
 }
 
 .qdn-todo-item:hover .qdn-todo-more,
@@ -348,73 +471,69 @@
 }
 
 .qdn-todo-more:hover {
-  color: var(--interactive-accent);
-  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  color: var(--text-normal);
+  background: var(--qdn-hover);
 }
 
 .qdn-todo-edit-input {
   flex: 1;
   min-width: 0;
-  font-size: 13px;
-  border-radius: 4px;
-  border: 1px solid var(--interactive-accent);
-  background: var(--background-primary);
-  padding: 2px 6px;
+  padding: 3px 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-normal);
+  border-radius: 8px;
+  border: 1px solid var(--qdn-accent);
+  background: var(--qdn-card-bg);
   /* 多行编辑：高度由 autosizeTextarea 按内容设定，超长封顶滚动 */
   resize: none;
-  line-height: 1.5;
-  max-height: 40vh;
+  max-height: 140px;
   overflow-y: auto;
 }
 
 .qdn-todo-empty {
-  color: var(--text-muted);
-  font-size: 12px;
-  padding: 16px 8px;
-  text-align: center;
-  border: 1px dashed var(--background-modifier-border);
-  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--text-faint);
+  font-size: 11.5px;
 }
 
 .qdn-todo-add {
   display: flex;
+  align-items: flex-end;
   gap: 6px;
-  margin-top: 10px;
-  /* 浮动在面板底部：内容超高滚动时始终可见，且高于右下角悬浮状态栏（实测约 27px） */
-  position: sticky;
-  bottom: 36px;
-  background-color: var(--background-primary);
-  backdrop-filter: blur(4px);
-  border-radius: 6px;
-  padding: 6px 8px;
-  margin-left: -8px;
-  margin-right: -8px;
+  margin-top: 8px;
 }
 
 .qdn-todo-add input,
 .qdn-todo-add textarea {
   flex: 1;
   min-width: 0;
-  border-radius: 6px;
-  border: 1px solid var(--background-modifier-border);
-  background: var(--background-primary);
-  padding: 6px 10px;
-  font-size: 13px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-normal);
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: var(--qdn-chip-bg);
+  outline: none;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-/* 多行添加框：高度自适应，超过约 5 行后内部滚动（浮条不无限撑高） */
+/* 多行添加框：高度自适应，超过约 5 行后内部滚动 */
 .qdn-todo-add textarea {
   resize: none;
-  line-height: 1.5;
-  max-height: 128px;
+  max-height: 140px;
   overflow-y: auto;
 }
 
 .qdn-todo-add input:focus,
 .qdn-todo-add textarea:focus {
-  border-color: var(--interactive-accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 20%, transparent);
+  background: var(--qdn-card-bg);
+  box-shadow: 0 0 0 2px var(--qdn-accent-soft);
+}
+
+.qdn-todo-add textarea::placeholder {
+  color: var(--text-faint);
 }
 
 .qdn-todo-add-btn {
@@ -705,44 +824,41 @@ button.qdn-danger-btn {
   border-color: var(--text-error);
 }
 
-/* 待办顺延提示 */
+/* 待办顺延提示（quick-note 同款 warn 配色） */
 .qdn-carryover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-  padding: 6px 10px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--interactive-accent) 35%, transparent);
-  font-size: 12px;
-  color: var(--text-normal);
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: var(--qdn-warn-bg);
+  border: none;
+  font-size: 11px;
+  color: var(--qdn-warn-text);
 }
 
 .qdn-carryover-btn {
-  border: none;
-  border-radius: 4px;
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-  font-size: 12px;
-  padding: 3px 10px;
-  cursor: pointer;
   flex-shrink: 0;
 }
 
-.qdn-carryover-btn:hover {
-  opacity: 0.9;
-}
-
-/* 日记统计 */
+/* 日记统计：胶囊 */
 .qdn-stats {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: center;
   margin-top: 8px;
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-muted);
+}
+
+.qdn-stat {
+  padding: 2px 8px;
+  background: var(--qdn-chip-bg);
+  border-radius: 999px;
+  white-space: nowrap;
 }
 
 /* 设置页使用说明 */
@@ -945,11 +1061,9 @@ button.qdn-danger-btn {
   }
 }
 
-/* 自定义界面背景：覆盖层（::before / 视频）z-index: -1，位于所有内容之下，且从标题栏
-   下方开始（--qdn-bg-top 由 main.ts 注入）。
-   重要（Electron 限制，多轮实测确认）：覆盖层只要与拖拽区（标题栏/标签栏）区域重叠，
-   无论 z-index / 透明度都会使窗口拖拽失效（Chromium 拖拽区域裁剪判定基于层内容
-   不透明度）；因此覆盖层避开标题栏区域，标题栏保持原生主题色、可正常拖动。 */
+/* 自定义界面背景：覆盖层（::before / 视频）z-index: -1，位于所有内容之下，并从
+   .titlebar 下方开始（--qdn-bg-top 由 main.ts 注入）——顶栏是窗口拖拽区，透明
+   覆盖层会让空白处拖不动窗口。顶栏自己的壁纸玻璃帧见下方 .titlebar 规则。 */
 body.qdn-bg-image {
   background-color: transparent;
   /* ribbon 工具栏（含收起态）与状态栏使用独立背景变量，不在 workspace 层透明清单内，
@@ -1001,15 +1115,166 @@ body.qdn-bg-image .status-bar {
 
 /* 背景图模式下，面板内的输入类控件若沿用 var(--background-primary) 会解析为透明，
    底下的待办文字/壁纸透上来导致看不清输入内容。body 本层未被透明化（仍持有主题原色），
-   在此捕获为 --qdn-solid-primary 供面板内控件当实底用。 */
+   在此捕获为 --qdn-solid-primary 供面板内控件当实底用。
+   注意：Blue Topaz 等玻璃主题会把 --background-primary 设成带 alpha 的颜色
+   （例如 #1f1f1f52），直接拿它当实底会让卡片透出壁纸。这里用主题基础实色
+   --color-base-00 兜底，卡片再把主题色叠在实底上（见下面的 .qdn-card 规则）。 */
 body.qdn-bg-image {
-  --qdn-solid-primary: var(--background-primary);
+  --qdn-solid-primary: var(--color-base-00, var(--background-primary));
+  --qdn-theme-primary: var(--background-primary);
+  /* 输入框等控件用实底；卡片在此基础上再叠一层主题色 */
+  --qdn-card-bg: var(--qdn-solid-primary);
 }
 
-body.qdn-bg-image .qdn-todo-add,
-body.qdn-bg-image .qdn-todo-edit-input,
-body.qdn-bg-image .qdn-todo-more {
-  background-color: var(--qdn-solid-primary);
+body.qdn-bg-image .qdn-card {
+  background-color: var(--qdn-solid-primary) !important;
+  background-image: linear-gradient(var(--qdn-theme-primary), var(--qdn-theme-primary)) !important;
+}
+
+/* 顶栏（标题栏/标签栏）玻璃：
+   顶栏是窗口拖拽区，不能铺透明覆盖层（空白处会拖不动）。这里由 main.ts 生成一张
+   不透明的「壁纸帧」作为顶栏自己的 background-image，CSS 再按深浅主题叠一层 tint；
+   拖拽区始终有内容，同时保住壁纸观感。 */
+body.qdn-bg-image .titlebar,
+body.qdn-bg-image .titlebar-inner,
+body.qdn-bg-image .workspace-tab-header-container,
+body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header,
+body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header-inner,
+body.qdn-bg-image .titlebar-button-container {
+  background-color: transparent !important;
+  background-image: none !important;
+  border-bottom: none !important;
+  box-shadow: none !important;
+}
+
+body.qdn-bg-image .titlebar {
+  background-color: var(--background-primary) !important;
+  background-image: none !important;
+}
+
+/* 顶栏壁纸帧：几何（size/pos）由 main.ts 按主背景的 cover 渲染计算，
+   让这条带正好是壁纸向上延续的部分；滤镜/透明度与主背景一致，接缝对齐。 */
+body.qdn-bg-image .titlebar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image: var(--qdn-bg-titlebar);
+  background-size: var(--qdn-titlebar-bg-size, cover);
+  background-position: var(--qdn-titlebar-bg-pos, center);
+  background-repeat: no-repeat;
+  opacity: var(--qdn-bg-opacity, 0.6);
+  filter: blur(var(--qdn-bg-blur, 0px)) brightness(var(--qdn-bg-brightness, 100%)) contrast(var(--qdn-bg-contrast, 100%));
+  pointer-events: none;
+}
+
+/* 当前主标签页用主题自己的 tab 背景色：标签左右下角的圆角伪元素也是这个色
+   （--tab-background-active），之前用半透明白会让两个下角露出不同颜色的小块。
+   只作用于主标签栏；左右侧栏顶部的小标签保持玻璃透明，不能变成深色块。 */
+body.qdn-bg-image .workspace-split.mod-root .workspace-tabs.mod-top .workspace-tab-header.is-active {
+  background-color: var(--tab-background-active, var(--color-base-00)) !important;
+}
+
+/* 左右侧栏顶部的标签是玻璃上的小图标，不该用主标签那种深色实底；
+   连标签两角的伪元素阴影一起去掉，否则透明 tab + 深色角会形成新的色块。 */
+body.qdn-bg-image .workspace-split.mod-left-split .workspace-tabs.mod-top .workspace-tab-header,
+body.qdn-bg-image .workspace-split.mod-right-split .workspace-tabs.mod-top .workspace-tab-header {
+  background-color: transparent !important;
+}
+body.qdn-bg-image .workspace-split.mod-left-split .workspace-tabs.mod-top .workspace-tab-header::before,
+body.qdn-bg-image .workspace-split.mod-left-split .workspace-tabs.mod-top .workspace-tab-header::after,
+body.qdn-bg-image .workspace-split.mod-right-split .workspace-tabs.mod-top .workspace-tab-header::before,
+body.qdn-bg-image .workspace-split.mod-right-split .workspace-tabs.mod-top .workspace-tab-header::after {
+  box-shadow: none !important;
+}
+body.qdn-bg-image .workspace-split.mod-left-split .workspace-tabs.mod-top .workspace-tab-header.is-active,
+body.qdn-bg-image .workspace-split.mod-right-split .workspace-tabs.mod-top .workspace-tab-header.is-active {
+  color: var(--text-normal) !important;
+}
+
+/* 顶栏内的图标/标签文字必须可见：对比“不开背景图”的顶栏，这些元素现在
+   被主题的 icon 变量/低透明度吃掉了。这里在顶栏范围内统一拉回正文/次要色，
+   并锁死 opacity；背景玻璃和拖拽逻辑不变。 */
+body.qdn-bg-image .titlebar,
+body.qdn-bg-image .titlebar *,
+body.qdn-bg-image .workspace-tab-header-container,
+body.qdn-bg-image .workspace-tab-header-container * {
+  --icon-color: var(--text-normal);
+  --icon-color-hover: var(--text-normal);
+  --icon-color-active: var(--text-normal);
+  --icon-color-focused: var(--text-normal);
+  --tab-text-color: var(--text-normal);
+  --tab-text-color-active: var(--text-normal);
+  --tab-text-color-focused: var(--text-normal);
+  --tab-text-color-focused-active: var(--text-normal);
+  --tab-text-color-focused-active-current: var(--text-normal);
+}
+
+body.qdn-bg-image .titlebar-button,
+body.qdn-bg-image .titlebar .clickable-icon,
+body.qdn-bg-image .titlebar-button-container .clickable-icon,
+body.qdn-bg-image .workspace-tab-header-container .clickable-icon,
+body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header,
+body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header-inner {
+  color: var(--text-normal) !important;
+  opacity: 1 !important;
+}
+
+body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header .workspace-tab-header-inner-title {
+  color: var(--text-normal) !important;
+  opacity: 1 !important;
+}
+body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header.is-active .workspace-tab-header-inner-title {
+  color: var(--text-normal) !important;
+}
+body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header-inner-close-button {
+  color: var(--text-muted) !important;
+  opacity: 1 !important;
+}
+
+/* 顶栏玻璃层（z-index: 30）会盖住左右侧栏在同一个顶部行的标签头——
+   它们不在 .titlebar 里，但视觉上位于顶栏。只抬“可点击的标签本身”到玻璃层之上，
+   不要抬整个标签头容器：容器宽度包含右侧窗口控制区域，抬上去会挡住
+   最小化/最大化/关闭按钮。侧栏开关则通过抬它所在的 ribbon 层级显示，
+   不能改它自己的 position（否则会从标题栏左上角掉到 ribbon 第一行）。
+   主标签栏的非当前标签同样没有自己的 z-index，也要一起抬；否则只有当前标签可见。 */
+body.qdn-bg-image .workspace-ribbon.side-dock-ribbon {
+  z-index: 31 !important;
+}
+body.qdn-bg-image .workspace-split.mod-left-split .workspace-tabs.mod-top .workspace-tab-header,
+body.qdn-bg-image .workspace-split.mod-right-split .workspace-tabs.mod-top .workspace-tab-header,
+body.qdn-bg-image .workspace-split.mod-root .workspace-tabs.mod-top .workspace-tab-header,
+body.qdn-bg-image .workspace-tab-header-new-tab {
+  position: relative !important;
+  z-index: 31 !important;
+}
+
+/* 左右侧栏开关：保持原来的 absolute 定位，只把背景换成玻璃（不要深色块） */
+body.qdn-bg-image .sidebar-toggle-button.mod-left,
+body.qdn-bg-image .sidebar-toggle-button.mod-right {
+  background-color: transparent !important;
+  background-image: none !important;
+  color: var(--text-normal) !important;
+  --icon-color: var(--text-normal);
+  z-index: 31 !important;
+}
+
+/* 侧栏开关的图标字形本身是一个“圆角方块”：透明背景下它的内部会直接露出
+   原始壁纸，看起来就像一块深色按钮底。给外框填一层玻璃 tint，让按钮底色
+   和顶栏玻璃一致（外框描边/内部竖条仍是 currentColor）。 */
+body.qdn-bg-image .sidebar-toggle-button .sidebar-toggle-icon-outer {
+  fill: rgba(255, 255, 255, 0.12);
+}
+body.qdn-bg-image.theme-light .sidebar-toggle-button .sidebar-toggle-icon-outer {
+  fill: rgba(0, 0, 0, 0.08);
+}
+
+/* ribbon 自己的 ::before 是一块实色（--titlebar-background #151515），它比
+   玻璃层还高（ribbon z31），正好垫在侧栏开关图标底下，看起来就像开关
+   带着深色背景。背景图模式下让它透明，露出顶栏玻璃。 */
+body.qdn-bg-image .workspace-ribbon.side-dock-ribbon::before {
+  background-color: transparent !important;
+  background-image: none !important;
 }
 
 /* 其余自带背景色的工作区元素直接透明（不参与窗口拖拽）：仓库信息栏、头部工具栏、标签页 */
@@ -1090,42 +1355,32 @@ body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header:not(.is-
 
 /* 当天日记列表（日历面板） */
 .qdn-day-notes {
-  margin: 8px 12px 0;
-  padding-top: 8px;
-  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 12px;
 }
 .qdn-day-notes-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
   margin-bottom: 4px;
 }
 .qdn-day-notes-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-.qdn-day-notes-add {
   font-size: 11px;
-  padding: 1px 8px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
 }
 .qdn-day-note {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 8px;
-  border-radius: 4px;
-  font-size: 13px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12.5px;
   color: var(--text-normal);
   cursor: pointer;
   position: relative;
-}
-.qdn-day-note-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  transition: background-color 0.12s ease;
 }
 .qdn-day-note-name {
   flex: 1 1 0;
@@ -1135,12 +1390,28 @@ body.qdn-bg-image .workspace-tab-header-container .workspace-tab-header:not(.is-
   white-space: nowrap;
 }
 .qdn-day-note:hover {
-  background: var(--background-modifier-hover);
+  background: var(--qdn-hover);
+}
+/* 当天日记行的 ⋯ 是透明小按钮（待办行的 ⋯ 才是带底的小胶囊） */
+.qdn-day-note .qdn-todo-more {
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  box-shadow: none;
+}
+.qdn-day-note .qdn-todo-more:hover {
+  color: var(--text-normal);
+  background: var(--qdn-hover);
 }
 .qdn-day-notes-empty {
-  padding: 3px 8px;
-  font-size: 12px;
-  color: var(--text-muted);
+  padding: 4px 8px;
+  font-size: 11.5px;
+  color: var(--text-faint);
 }
 
 /* ===== 移动端适配（Obsidian 在移动端给 body 加 is-mobile 类，桌面不受影响） ===== */
@@ -1154,34 +1425,8 @@ body.is-mobile .qdn-panel-spacer {
   flex: 0 0 84px;
   height: 84px;
 }
-/* 移动端原生按钮样式会把小按钮放大成大灰块（默认灰底 + 大触控高度），
-   待办头部「+ 新增」与当天日记「＋ 新建」压回紧凑的描边幽灵按钮 */
-body.is-mobile .qdn-todo-new-btn,
-body.is-mobile .qdn-day-notes-add {
-  min-height: 0;
-  height: auto;
-  padding: 2px 8px;
-  font-size: 11px;
-  border-radius: 4px;
-  background: transparent;
-  border: 1px solid var(--background-modifier-border);
-  color: var(--text-muted);
-  box-shadow: none;
-  flex-shrink: 0;
-}
-body.is-mobile .qdn-todo-new-btn:hover,
-body.is-mobile .qdn-day-notes-add:hover {
-  color: var(--text-normal);
-  border-color: var(--interactive-accent);
-  background: transparent;
-}
-/* 待办标题行的「N 项未完成」 */
-body.is-mobile .qdn-todos-pending {
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
+/* 移动端小按钮（+ 新增 / ＋ 新建 / 今天 / 添加）统一交给 .qdn-mini-btn，
+   不再单独重置原生按钮样式。 */
 /* 手机没有真正的 hover：点过的行会一直卡在悬停态（行高亮 + 不透明悬浮按钮
    叠在文字上像一条突兀的深色横带）。去掉行悬停高亮，⋯ 菜单按钮改为常显
    （触屏本来也无法唤出 hover） */
@@ -1197,6 +1442,7 @@ body.is-mobile .qdn-todo-more {
   pointer-events: auto;
   flex-shrink: 0;
   align-self: center;
+  width: auto;
   min-height: 0;
   height: auto;
   padding: 4px 8px;
@@ -1213,12 +1459,6 @@ body.is-mobile .qdn-todo-item input[type="checkbox"] {
   min-height: 16px;
   max-width: 16px;
   max-height: 16px;
-}
-/* 编辑中的行在移动端不悬浮钉住（sticky 定位 + 阴影在半透明背景变量下
-   会形成一条压在内容上的暗色横带） */
-body.is-mobile .qdn-todo-editing {
-  position: static;
-  box-shadow: none;
 }
 /* 移动端原生 textarea 控件可能被 min-height 撑高，锁回内容自适应 */
 body.is-mobile .qdn-todo-edit-input,
@@ -1240,9 +1480,6 @@ body.is-mobile .qdn-cal-cell {
 }
 body.is-mobile .qdn-cal-weekday {
   font-size: 10px;
-}
-body.is-mobile .qdn-calendar {
-  margin-bottom: 12px;
 }
 
 /* 新增待办弹窗（移动端「+ 新增」按钮唤起） */
